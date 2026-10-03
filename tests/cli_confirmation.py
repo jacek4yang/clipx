@@ -12,6 +12,20 @@ import time
 
 binary = str(pathlib.Path(sys.argv[1]).resolve())
 
+def free_port():
+    # TCP-free does not imply UDP-free (notably on Windows runners).
+    for _ in range(100):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp, socket.socket() as tcp:
+            udp.bind(('127.0.0.1', 0))
+            port = udp.getsockname()[1]
+            try:
+                tcp.bind(('127.0.0.1', port))
+                tcp.listen(1)
+                return str(port)
+            except OSError:
+                continue
+    raise RuntimeError('no jointly available UDP/TCP loopback port')
+
 class Child:
     def __init__(self, args, env):
         self.p = subprocess.Popen([binary, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -61,9 +75,7 @@ with tempfile.TemporaryDirectory(prefix='clipx-confirm-') as tmp:
     cases = 0
     for mode in ['tcp', 'quic', 'auto']:
         for send_yes, recv_yes in [(False, False), (True, False), (False, True), (True, True)]:
-            with socket.socket() as sock:
-                sock.bind(('127.0.0.1', 0))
-                port = str(sock.getsockname()[1])
+            port = free_port()
             dl = home / 'Downloads'
             server = Child(['--json', '--port', port, '--downloads', str(dl), 'recv',
                             '--headless', '--bind', '127.0.0.1', '--transport', mode,
@@ -99,9 +111,7 @@ with tempfile.TemporaryDirectory(prefix='clipx-confirm-') as tmp:
                 server.close()
     # Decline on either side, including an automatically accepting opposite endpoint.
     for decline_sender in [True, False]:
-        with socket.socket() as sock:
-            sock.bind(('127.0.0.1', 0))
-            port = str(sock.getsockname()[1])
+        port = free_port()
         server = Child(['--json', '--port', port, '--downloads', str(dl), 'recv', '--headless',
                         '--bind', '127.0.0.1', *(['--yes'] if decline_sender else [])], env)
         sender = None
