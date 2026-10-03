@@ -96,6 +96,9 @@ pub fn validate_manifest(entries: &[Entry]) -> Result<()> {
     let mut dirs = HashSet::new();
     let mut bytes = 0;
     for e in entries {
+        if e.modified_ns >= 1_000_000_000 {
+            bail!("invalid timestamp fraction");
+        }
         validate_relative(&e.path)?;
         bytes += e.path.len() + 64;
         if bytes > MAX_METADATA {

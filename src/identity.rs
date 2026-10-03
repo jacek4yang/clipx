@@ -236,3 +236,27 @@ impl ClientCertVerifier for PinClient {
         schemes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn identity_is_persistent_and_private() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let a = super::Identity::load(dir.path())?;
+        let b = super::Identity::load(dir.path())?;
+        assert_eq!(a.fp(), b.fp());
+        assert_eq!(a.id, b.id);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.path().join("identity.json"))?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        Ok(())
+    }
+}

@@ -8,8 +8,8 @@ import zipfile
 target = sys.argv[1]
 windows = 'windows' in target
 binary = 'clipx.exe' if windows else 'clipx'
-files = [(pathlib.Path('target/release') / binary, binary)]
-files += [(pathlib.Path(p), p) for p in ['README.md', 'README.zh-CN.md', 'SECURITY.md', 'LICENSE', 'docs/PROTOCOL.md']]
+files = [(pathlib.Path('target') / target / 'release' / binary, binary)]
+files += [(pathlib.Path(p), p) for p in ['README.md', 'README.zh-CN.md', 'SECURITY.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'docs/PROTOCOL.md']]
 out = pathlib.Path('dist')
 out.mkdir(exist_ok=True)
 archive = out / ('clipx-' + target + ('.zip' if windows else '.tar.gz'))

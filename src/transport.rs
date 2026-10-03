@@ -133,7 +133,9 @@ async fn one(
                 socket,
             )
             .await?;
-        if tls.get_ref().1.alpn_protocol() != Some(protocol::ALPN) {
+        if tls.get_ref().1.alpn_protocol() != Some(protocol::ALPN)
+            || tls.get_ref().1.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
+        {
             bail!("ALPN mismatch");
         }
         let (r, w) = tokio::io::split(tls);
@@ -267,7 +269,9 @@ pub async fn accept_tcp(
         .and_then(|c| c.first())
         .context("missing client certificate")?;
     let fp = crate::identity::fingerprint(cert.as_ref());
-    if tls.get_ref().1.alpn_protocol() != Some(protocol::ALPN) {
+    if tls.get_ref().1.alpn_protocol() != Some(protocol::ALPN)
+        || tls.get_ref().1.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
+    {
         bail!("ALPN mismatch");
     }
     let (r, w) = tokio::io::split(tls);

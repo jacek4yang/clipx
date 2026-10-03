@@ -292,6 +292,7 @@ async fn malicious_path_rejected() -> Result<()> {
             size: 0,
             directory: false,
             modified: 0,
+            modified_ns: 0,
         }))
         .await?;
     assert!(s.ctrl.recv().await.is_err());
@@ -319,6 +320,7 @@ async fn incomplete_clipboard_never_commits() -> Result<()> {
             size: 4,
             directory: false,
             modified: 0,
+            modified_ns: 0,
         }))
         .await?;
     assert!(matches!(s.ctrl.recv().await?, Msg::Accept { .. }));
@@ -348,6 +350,7 @@ async fn corrupted_chunk_never_commits() -> Result<()> {
             size: 4,
             directory: false,
             modified: 0,
+            modified_ns: 0,
         }))
         .await?;
     assert!(matches!(s.ctrl.recv().await?, Msg::Accept { .. }));

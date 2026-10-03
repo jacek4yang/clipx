@@ -14,8 +14,12 @@ on your own machines before depending on it for irreplaceable data.
 
 Download the appropriate executable archive from GitHub Releases, verify its
 SHA-256 against `SHA256SUMS.txt`, extract, and put `clipx` / `clipx.exe` on PATH.
-Linux binaries target x86-64 GNU/Linux; release builds use Ubuntu 22.04 for a
-conservative glibc baseline. Windows builds target x86-64 MSVC.
+For Linux, prefer **x86_64-unknown-linux-musl**: a statically linked executable
+with no ELF interpreter or shared-library dependency. A GNU/Linux alternative is
+also provided, built on Ubuntu 22.04 for a conservative glibc baseline.
+Windows builds use the static MSVC CRT and are checked for system-only DLL imports.
+Copying the executable alone is sufficient; included documents are optional.
+`clipx licenses` displays third-party notices embedded in the executable.
 
 On each device, print its identity:
 
@@ -108,7 +112,8 @@ your preferred terminal/service manager. No root/admin privileges are required.
 - Files/archives are transferred unchanged; directories use a native manifest
   and streamed files, never a whole temporary archive.
 - Symlinks, FIFOs, sockets and devices are rejected. Non-Unicode filenames are
-  rejected with an actionable error. Windows-invalid components are escaped;
+  rejected with an actionable error. Network-share clipboard paths require
+  explicit `--path` to avoid implicit SMB authentication. Windows-invalid components are escaped;
   long names are shortened with a hash, and case-insensitive collisions get
   suffixes. Mapping does not change file contents.
 - Downloads uses the platform directory API, then `$HOME/Downloads` fallback.
@@ -204,9 +209,9 @@ cargo test --test clipboard_graphical -- --ignored --nocapture
 
 Rust 1.99.0 is pinned in rust-toolchain.toml; Cargo.lock is committed. Linux
 clipboard support uses Rust X11/Wayland clients; no OpenSSL or language runtime
-is needed. A working system Wayland client library/compositor may be needed on
-Wayland. Tests distinguish headless payload delivery from actual clipboard
-round-trips. CI builds and tests Windows and Linux, then publishes archives and
+is needed. Wayland uses a Rust-native protocol client; a running compositor supporting
+its data-control protocol is still necessary. Tests distinguish headless payload delivery from actual clipboard
+round-trips. CI builds and tests Windows, Linux GNU and static Linux musl, then publishes archives and
 SHA-256 checksums only after both succeed. Initial releases are marked pre-release.
 
 See [SECURITY.md](SECURITY.md), [protocol](docs/PROTOCOL.md) and

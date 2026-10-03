@@ -101,6 +101,8 @@ enum Command {
         fingerprint: Option<String>,
     },
     Fingerprint,
+    /// Display embedded third-party license notices (no external file needed).
+    Licenses,
     Peer {
         #[command(subcommand)]
         action: Peer,
@@ -134,7 +136,49 @@ fn emit(cli: &Cli, event: &str, value: serde_json::Value) {
     if cli.json {
         println!("{}", serde_json::json!({"event":event,"data":value}));
     } else if !cli.quiet {
-        println!("{event}: {value}");
+        match event {
+            "fingerprint" => println!(
+                "Device: {}\nFingerprint (BLAKE3): {}",
+                value["name"].as_str().unwrap_or(""),
+                value["blake3_cert"].as_str().unwrap_or("")
+            ),
+            "transfer" => println!(
+                "Transfer {}: {} entries, {} bytes",
+                value["id"].as_str().unwrap_or(""),
+                value["entries"],
+                value["bytes"]
+            ),
+            "connected" => println!(
+                "Connected via {}",
+                if value["transport"] == "quic" {
+                    "QUIC / TLS 1.3"
+                } else {
+                    "TCP / TLS 1.3"
+                }
+            ),
+            "progress" => {
+                let done = value["verified_bytes"].as_u64().unwrap_or(0);
+                let total = value["total_bytes"].as_u64().unwrap_or(0);
+                let percent = if total == 0 {
+                    100.0
+                } else {
+                    100.0 * done as f64 / total as f64
+                };
+                println!(
+                    "{percent:5.1}%  {done}/{total} bytes  {:.1} MiB/s",
+                    value["bytes_per_second"].as_f64().unwrap_or(0.0) / 1048576.0
+                );
+            }
+            "verified" => {
+                println!("Verified.");
+                if let Some(paths) = value["paths"].as_array() {
+                    for p in paths {
+                        println!("  -> {}", p.as_str().unwrap_or(""));
+                    }
+                }
+            }
+            _ => println!("{event}: {value}"),
+        }
     }
 }
 #[tokio::main]
@@ -146,9 +190,14 @@ async fn main() {
 }
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Command::Licenses) {
+        print!("{}", include_str!("../THIRD_PARTY_NOTICES.md"));
+        return Ok(());
+    }
     let config = identity::config_dir(cli.config_dir.clone())?;
     let id = Arc::new(Identity::load(&config)?);
     match &cli.command {
+        Command::Licenses => {}
         Command::Fingerprint => emit(
             &cli,
             "fingerprint",

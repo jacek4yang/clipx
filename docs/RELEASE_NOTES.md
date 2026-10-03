@@ -4,7 +4,8 @@ First clipx release candidate for Windows 11 x86-64 and Linux Mint/x86-64 GNU/Li
 - QUIC first, TLS 1.3 TCP fallback, mutual certificate pinning.
 - Verified 1 MiB chunk resume, reconnect, streamed directory manifests, zstd.
 - No-overwrite atomic commits, headless fallback, portable filenames.
-- Windows/Linux executables built by the attached GitHub Actions run.
+- Windows static-CRT and Linux static-musl / GNU executables built by GitHub Actions.
+- Self-contained runtime checks; license notices embedded in the executable.
 
 Verify SHA256SUMS.txt before installation. Pair by independently checking both
 devices' fingerprints. Read README and SECURITY before use.

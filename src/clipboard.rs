@@ -7,6 +7,21 @@ pub enum Content {
     Paths(Vec<PathBuf>),
     Bytes(Kind, Vec<u8>),
 }
+fn local_clipboard_path(s: &str) -> Result<PathBuf> {
+    if s.starts_with("file:") {
+        let u = url::Url::parse(s)?;
+        if u.host_str().is_some_and(|h| h != "localhost") {
+            bail!("network clipboard paths require explicit --path");
+        }
+        u.to_file_path()
+            .map_err(|_| anyhow!("invalid local file URI"))
+    } else {
+        if s.starts_with("\\\\") || s.starts_with("//") {
+            bail!("network clipboard paths require explicit --path");
+        }
+        Ok(PathBuf::from(s))
+    }
+}
 pub fn read() -> Result<Content> {
     let ctx = ClipboardContext::new()
         .map_err(|e| anyhow!("clipboard unavailable: {e}; use --path, --text or --stdin"))?;
@@ -15,15 +30,7 @@ pub fn read() -> Result<Content> {
     {
         let paths = files
             .into_iter()
-            .map(|s| {
-                if s.starts_with("file:") {
-                    url::Url::parse(&s)?
-                        .to_file_path()
-                        .map_err(|_| anyhow!("nonlocal file URI"))
-                } else {
-                    Ok(PathBuf::from(s))
-                }
-            })
+            .map(|s| local_clipboard_path(&s))
             .collect::<Result<Vec<_>>>()?;
         return Ok(Content::Paths(paths));
     }
@@ -144,6 +151,12 @@ pub fn dibv5(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_does_not_open_remote_shares() {
+        assert!(super::local_clipboard_path("file://attacker.example/share/file").is_err());
+        assert!(super::local_clipboard_path("\\\\attacker\\share").is_err());
+        assert!(super::local_clipboard_path("/tmp/local.txt").is_ok());
+    }
     #[test]
     fn tiny_dibv5_has_correct_header_and_pixels() {
         let d = super::dibv5(1, 1, &[200, 50, 10, 255]).unwrap();

@@ -54,6 +54,8 @@ pub struct Entry {
     pub size: u64,
     pub directory: bool,
     pub modified: i64,
+    #[serde(default)]
+    pub modified_ns: u32,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Offer {
@@ -103,6 +105,9 @@ pub enum Msg {
     },
     WorkerDone,
     Finish,
+    Paths {
+        paths: Vec<String>,
+    },
     Complete {
         paths: Vec<String>,
     },

@@ -25,6 +25,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     steps:
@@ -34,29 +36,46 @@ jobs:
       - name: Install pinned Rust
         shell: bash
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - name: Install musl build tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: clipx-${{ runner.os }}-rust199-${{ hashFiles('Cargo.lock', '.cargo/config.toml') }}
+          key: clipx-${{ matrix.target }}-rust199-${{ hashFiles('Cargo.lock', '.cargo/config.toml') }}
+          restore-keys: clipx-${{ matrix.target }}-rust199-
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --all-features
+      - run: cargo clippy --locked --target ${{ matrix.target }} --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --target ${{ matrix.target }} --all-features
       - name: Real X11 clipboard test
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb xauth
-          xvfb-run -a cargo test --locked --test clipboard_graphical -- --ignored --nocapture
+          xvfb-run -a cargo test --locked --target ${{ matrix.target }} --test clipboard_graphical -- --ignored --nocapture
       - name: Real Windows clipboard test
         if: runner.os == 'Windows'
-        run: cargo test --locked --test clipboard_graphical -- --ignored --nocapture
-      - run: cargo build --locked --release
+        run: cargo test --locked --target ${{ matrix.target }} --test clipboard_graphical -- --ignored --nocapture
+      - run: cargo build --locked --target ${{ matrix.target }} --release
       - name: Kill receiver and verify automatic process-restart resume
         shell: bash
-        run: python tests/cli_recovery.py target/release/clipx${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: python tests/cli_recovery.py target/${{ matrix.target }}/release/clipx${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Verify self-contained Linux binary
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          file target/${{ matrix.target }}/release/clipx
+          if readelf -l target/${{ matrix.target }}/release/clipx | grep INTERP; then exit 1; fi
+          if readelf -d target/${{ matrix.target }}/release/clipx | grep NEEDED; then exit 1; fi
+      - name: Verify Windows imports use system DLLs only
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python tools/check_pe_imports.py target/${{ matrix.target }}/release/clipx.exe
       - name: Package executable and documentation
         shell: bash
         run: python tools/package.py '${{ matrix.target }}'

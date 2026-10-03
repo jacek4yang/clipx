@@ -49,6 +49,13 @@ fn stamp(m: &fs::Metadata) -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+fn stamp_ns(m: &fs::Metadata) -> u32 {
+    m.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0)
+}
 fn open_regular(path: &Path, write: bool) -> Result<File> {
     let mut o = OpenOptions::new();
     o.read(true).write(write);
@@ -121,6 +128,7 @@ impl Plan {
                     size,
                     directory: m.is_dir(),
                     modified: stamp(&m),
+                    modified_ns: stamp_ns(&m),
                 });
                 sources.push(p.to_path_buf());
             }
@@ -281,7 +289,10 @@ async fn send_file(
     let (file, mut hasher) = blocking_heartbeat(w, move |cancel| {
         let mut file = open_regular(&src, false)?;
         let meta = file.metadata()?;
-        if meta.len() != expected.size || stamp(&meta) != expected.modified {
+        if meta.len() != expected.size
+            || stamp(&meta) != expected.modified
+            || stamp_ns(&meta) != expected.modified_ns
+        {
             bail!("source changed since scan: {}", src.display());
         }
         let mut hash = blake3::Hasher::new();
@@ -343,7 +354,7 @@ async fn send_file(
         }
     }
     let m = file.metadata().await?;
-    if m.len() != entry.size || stamp(&m) != entry.modified {
+    if m.len() != entry.size || stamp(&m) != entry.modified || stamp_ns(&m) != entry.modified_ns {
         bail!("source modified during transfer");
     }
     w.send(&Msg::FileDone {
@@ -429,6 +440,45 @@ async fn recv_worker(
         }
     }
 }
+async fn send_complete(w: &mut Wire, paths: Vec<String>) -> Result<()> {
+    let mut batch = Vec::new();
+    let mut bytes = 64usize;
+    for path in paths {
+        let n = serde_json::to_vec(&path)?.len() + 1;
+        if !batch.is_empty() && bytes + n > protocol::MAX_CONTROL / 2 {
+            w.send(&Msg::Paths {
+                paths: std::mem::take(&mut batch),
+            })
+            .await?;
+            bytes = 64;
+        }
+        if n > protocol::MAX_CONTROL / 2 {
+            bail!("destination path exceeds protocol result limit");
+        }
+        batch.push(path);
+        bytes += n;
+    }
+    w.send(&Msg::Complete { paths: batch }).await
+}
+async fn receive_complete(w: &mut Wire, mut msg: Msg) -> Result<Vec<String>> {
+    let mut result = Vec::new();
+    loop {
+        let (paths, done) = match msg {
+            Msg::Paths { paths } => (paths, false),
+            Msg::Complete { paths } => (paths, true),
+            _ => bail!("expected completion result"),
+        };
+        if result.len() + paths.len() > protocol::MAX_ENTRIES {
+            bail!("result path count limit");
+        }
+        result.extend(paths);
+        if done {
+            w.send(&Msg::Ack).await?;
+            return Ok(result);
+        }
+        msg = w.recv().await?;
+    }
+}
 pub async fn send_session(
     s: &mut Session,
     plan: Arc<Plan>,
@@ -448,9 +498,8 @@ pub async fn send_session_progress(
     }
     let workers = match s.ctrl.recv().await? {
         Msg::Accept { workers } if (1..=4).contains(&workers) => workers,
-        Msg::Complete { paths } => {
-            s.ctrl.send(&Msg::Ack).await?;
-            return Ok(paths);
+        msg @ (Msg::Complete { .. } | Msg::Paths { .. }) => {
+            return receive_complete(&mut s.ctrl, msg).await;
         }
         _ => bail!("expected transfer accept"),
     };
@@ -505,13 +554,8 @@ pub async fn send_session_progress(
         s.ctrl.send(&Msg::WorkerDone).await?;
     }
     s.ctrl.send(&Msg::Finish).await?;
-    match s.ctrl.recv().await? {
-        Msg::Complete { paths } => {
-            s.ctrl.send(&Msg::Ack).await?;
-            Ok(paths)
-        }
-        _ => bail!("expected verified completion"),
-    }
+    let msg = s.ctrl.recv().await?;
+    receive_complete(&mut s.ctrl, msg).await
 }
 fn prepare(
     downloads: &Path,
@@ -631,7 +675,10 @@ fn commit_files(downloads: &Path, stage: &Path, stored: &Stored) -> Result<Vec<S
             }
         }
         if e.modified > 0 {
-            filetime::set_file_mtime(&dst, filetime::FileTime::from_unix_time(e.modified, 0))?;
+            filetime::set_file_mtime(
+                &dst,
+                filetime::FileTime::from_unix_time(e.modified, e.modified_ns),
+            )?;
         }
     }
     // Apply directory times after children have been constructed.
@@ -643,7 +690,10 @@ fn commit_files(downloads: &Path, stage: &Path, stored: &Stored) -> Result<Vec<S
     {
         let p = tree.join(&e.path);
         if p.exists() {
-            filetime::set_file_mtime(p, filetime::FileTime::from_unix_time(e.modified, 0))?;
+            filetime::set_file_mtime(
+                p,
+                filetime::FileTime::from_unix_time(e.modified, e.modified_ns),
+            )?;
         }
     }
     for e in stored.entries.iter().rev().filter(|e| e.directory) {
@@ -788,7 +838,7 @@ pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> 
         blocking(move || prepare(&dl, &copy.owner, &copy.offer, &copy.entries)).await?;
     let guard = Arc::new(_lock);
     if let Some(paths) = receipt {
-        s.ctrl.send(&Msg::Complete { paths }).await?;
+        send_complete(&mut s.ctrl, paths).await?;
         let _ = s.ctrl.recv().await;
         return Ok(());
     }
@@ -843,14 +893,22 @@ pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> 
     if busy.lock().await.len() != stored.entries.iter().filter(|e| !e.directory).count() {
         bail!("every file must complete integrity verification in this session");
     }
-    for (i, e) in stored.entries.iter().enumerate() {
-        if !e.directory
-            && (!stage.join(format!("done-{i}.json")).is_file()
-                || fs::metadata(file_path(&stage, i))?.len() != e.size)
-        {
-            bail!("cannot finish: missing verified entry");
+    let checked = stored.entries.clone();
+    let checked_stage = stage.clone();
+    let checked_guard = guard.clone();
+    blocking(move || {
+        let _guard = checked_guard;
+        for (i, e) in checked.iter().enumerate() {
+            if !e.directory
+                && (!checked_stage.join(format!("done-{i}.json")).is_file()
+                    || fs::metadata(file_path(&checked_stage, i))?.len() != e.size)
+            {
+                bail!("cannot finish: missing verified entry");
+            }
         }
-    }
+        Ok(())
+    })
+    .await?;
     let mut paths_out: Option<Vec<String>> = None;
     if offer.kind != Kind::Files && !options.headless {
         let p = file_path(&stage, 0);
@@ -878,7 +936,7 @@ pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> 
         finish_commit(&dl, &st, &stored)
     })
     .await?;
-    s.ctrl.send(&Msg::Complete { paths }).await?;
+    send_complete(&mut s.ctrl, paths).await?;
     let _ = s.ctrl.recv().await;
     Ok(())
 }
@@ -1070,6 +1128,7 @@ mod tests {
             size: 7,
             directory: false,
             modified: 0,
+            modified_ns: 0,
         }];
         let stored = Stored {
             owner: "owner".into(),
@@ -1095,6 +1154,34 @@ mod tests {
         drop(lock);
         Ok(())
     }
+    #[tokio::test]
+    async fn completion_paths_are_paged() -> Result<()> {
+        let paths: Vec<String> = (0..2000)
+            .map(|i| format!("/Downloads/{i}/{}", "x".repeat(80)))
+            .collect();
+        let expected = paths.clone();
+        let (a, b) = tokio::io::duplex(8192);
+        let (ar, aw) = tokio::io::split(a);
+        let (br, bw) = tokio::io::split(b);
+        let mut sender = Wire {
+            r: Box::new(ar),
+            w: Box::new(aw),
+        };
+        let mut receiver = Wire {
+            r: Box::new(br),
+            w: Box::new(bw),
+        };
+        let task = tokio::spawn(async move {
+            send_complete(&mut sender, paths).await?;
+            assert!(matches!(sender.recv().await?, Msg::Ack));
+            Ok::<_, anyhow::Error>(())
+        });
+        let first = receiver.recv().await?;
+        let paths = receive_complete(&mut receiver, first).await?;
+        assert_eq!(paths, expected);
+        task.await??;
+        Ok(())
+    }
     #[test]
     fn cleanup_preserves_active_state() -> Result<()> {
         let root = tempfile::tempdir()?;
@@ -1109,6 +1196,7 @@ mod tests {
             size: 0,
             directory: false,
             modified: 0,
+            modified_ns: 0,
         }];
         let (stage, lock, _) = prepare(root.path(), "owner", &offer, &entries)?;
         assert_eq!(cleanup(root.path(), 0)?, 0);

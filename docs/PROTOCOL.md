@@ -24,11 +24,13 @@ it is never encoded into JSON. Max encoded/uncompressed chunk = 1,048,576 bytes.
 7. FileDone(real full-file BLAKE3 hex) -> Ack only after size/hash/fsync verification.
 8. WorkerDone on each worker, then Finish on control. Receiver requires every file
    verified, performs clipboard delivery or journaled no-replace commit, and writes
-   receipt before Complete(paths). Sender sends Ack; success is already durable.
+   receipt before Complete(paths). Large result lists use bounded Paths batches
+   followed by Complete; sender sends Ack after the final page. Success is already durable.
 
 Any invalid state yields Error(message) or connection termination; it never
 commits unverified output. Per-connection limits and timeouts apply. New physical
 connections reuse the same UUID/manifest and peer certificate, not TLS session state.
+Busy messages reset an idle timer during long, cancellable prefix verification.
 Resume is a verified per-file prefix, not arbitrary sparse range claiming. Completed
 files may be re-read for integrity reconstruction but need not be retransmitted.
 
