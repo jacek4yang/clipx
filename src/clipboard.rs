@@ -137,7 +137,7 @@ pub fn dibv5(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     data[12..14].copy_from_slice(&1u16.to_le_bytes());
     data[14..16].copy_from_slice(&32u16.to_le_bytes());
     data.try_reserve_exact(size)?;
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         data.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
     Ok(data)
