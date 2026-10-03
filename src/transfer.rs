@@ -710,7 +710,7 @@ fn prepare(
                 continue;
             }
             let candidate = item.path();
-            if candidate.join("finalize.json").exists() {
+            if candidate.join("finalize.json").exists() || candidate.join("cleanup.json").exists() {
                 continue;
             }
             let marker = candidate.join("resume.json");
@@ -724,6 +724,9 @@ fn prepare(
                 continue;
             }
             if let Ok(lock) = stage_lock(&candidate) {
+                if candidate.join("cleanup.json").exists() {
+                    continue;
+                }
                 selected = Some((candidate, lock));
                 break;
             }
@@ -737,6 +740,9 @@ fn prepare(
             (direct, lock)
         }
     };
+    if stage.join("cleanup.json").exists() {
+        bail!("checkpoint is being cleaned; retry the send command");
+    }
     let statefile = stage.join("state.json");
     if statefile.exists() {
         let old: Stored = serde_json::from_reader(File::open(&statefile)?)?;
@@ -1130,9 +1136,13 @@ pub fn cleanup(downloads: &Path, days: u64) -> Result<usize> {
         if saved.format != "clipx/2" {
             continue;
         }
+        // Windows cannot rename a directory with the locked child handle open.
+        // Publish a tombstone while holding the lock; every preparation checks it
+        // after acquiring the same lock, so no transfer can reopen this checkpoint.
+        paths::atomic_json(&stage.join("cleanup.json"), &true)?;
+        drop(lock);
         let deleting = downloads.join(format!(".clipx-cleanup-{}", uuid::Uuid::new_v4()));
         paths::rename_noreplace(&stage, &deleting)?;
-        drop(lock);
         fs::remove_dir_all(deleting)?;
         count += 1;
     }
