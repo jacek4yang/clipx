@@ -1,4 +1,4 @@
-# Validation record — RC3, 2026-10-03
+# Validation record — v0.1.0, 2026-10-03
 
 ## Local gates (Debian 13 x64, Rust 1.99.0)
 

@@ -17,7 +17,7 @@ only OS DLLs are imported. Windows builds are unsigned and may require normal
 SmartScreen review. Documents are optional; `clipx licenses` embeds all notices.
 A binary is specific to its OS/architecture, not universal across every computer.
 
-## Two commands (RC3 terminal UI)
+## Two commands
 
 Receiver:
 ```sh
@@ -169,7 +169,7 @@ python tests/cli_recovery.py target/release/clipx
 
 Rust 1.99.0 is pinned. CI tests Windows x64, GNU/Linux x64 and static musl x64,
 including real clipboard round-trips and process-level transfer tests, before
-release. This is a release candidate, not an independent security audit or a
+release. This stable release is not an independent security audit or a
 promise to outperform LocalSend. Wayland/compositor and physical desktop coverage
 are documented in [validation](docs/VALIDATION.md).
 See [security](SECURITY.md) and [protocol](docs/PROTOCOL.md).

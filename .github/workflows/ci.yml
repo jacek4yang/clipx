@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: 'Publish v0.1.0-rc.3 from this exact tested commit'
+        description: 'Publish v0.1.0 from this exact tested commit'
         type: boolean
         default: false
 permissions:
@@ -104,7 +104,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Verify and publish candidate
+      - name: Verify and publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -118,4 +118,4 @@ jobs:
           TAG="v$VERSION"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="${GITHUB_REF#refs/tags/}"; fi
           test "$TAG" = "v$VERSION"
-          gh release create "$TAG" *.zip *.tar.gz SHA256SUMS.txt --target "$COMMIT" --title "clipx $TAG" --notes-file ../docs/RELEASE_NOTES.md --prerelease
+          gh release create "$TAG" *.zip *.tar.gz SHA256SUMS.txt --target "$COMMIT" --title "clipx $TAG" --notes-file ../docs/RELEASE_NOTES.md

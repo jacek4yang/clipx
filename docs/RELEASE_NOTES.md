@@ -1,4 +1,4 @@
-# clipx v0.1.0-rc.3
+# clipx v0.1.0
 
 Fix real terminal confirmation and add explicitly requested RAM-only peer trust.
 
@@ -16,5 +16,5 @@ Fix real terminal confirmation and add explicitly requested RAM-only peer trust.
 - Protocol clipx/2 remains compatible, but upgrade both ends for the corrected UX.
 
 Windows x64 static CRT, Linux x64 static musl and GNU builds. All prior streaming,
-resume and no-overwrite behavior retained. Candidate release, not a zero-defect or
+resume and no-overwrite behavior retained. Stable release, not a zero-defect or
 universal-desktop guarantee. No runtime installation beyond the one executable.

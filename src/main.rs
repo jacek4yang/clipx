@@ -61,7 +61,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Receive; compare the one-time fingerprint and enter y for each session.
+    /// Receive; press Y to verify a new peer. Trust lasts only in this process.
     Recv {
         /// Automatically accept incoming sessions during this run. Use only on trusted networks.
         #[arg(long)]
@@ -211,7 +211,7 @@ async fn run() -> Result<()> {
                         emit(
                             &cli,
                             "reconnecting",
-                            serde_json::json!({"attempt":attempt,"delay_seconds":delay,"confirmation":"compare the new session fingerprint again"}),
+                            serde_json::json!({"attempt":attempt,"delay_seconds":delay,"confirmation":"verified peer reused in RAM; confirm only if identity is new"}),
                         );
                         tokio::time::sleep(Duration::from_secs(delay)).await;
                     }
