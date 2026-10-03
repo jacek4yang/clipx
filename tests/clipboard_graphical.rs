@@ -22,7 +22,7 @@ async fn graphical_text_image_and_copied_file_list() -> Result<()> {
         _ => anyhow::bail!("expected screenshot image"),
     }
     let dir = tempfile::tempdir()?;
-    let path = dir.path().join("copied.txt");
+    let path = dir.path().join("复制 file.txt");
     std::fs::write(&path, b"test")?;
     #[cfg(windows)]
     let copied = path.to_string_lossy().into_owned();

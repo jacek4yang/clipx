@@ -19,6 +19,8 @@ with no ELF interpreter or shared-library dependency. A GNU/Linux alternative is
 also provided, built on Ubuntu 22.04 for a conservative glibc baseline.
 Windows builds use the static MSVC CRT and are checked for system-only DLL imports.
 Copying the executable alone is sufficient; included documents are optional.
+Windows executables are currently unsigned, so SmartScreen or local security
+policy may require user review. Verify checksums; no security bypass is installed.
 `clipx licenses` displays third-party notices embedded in the executable.
 
 On each device, print its identity:

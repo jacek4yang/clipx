@@ -191,7 +191,21 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     if matches!(cli.command, Command::Licenses) {
-        print!("{}", include_str!("../THIRD_PARTY_NOTICES.md"));
+        let runtime = zstd::bulk::decompress(
+            include_bytes!("../docs/licenses/rust-library.html.zst"),
+            2 * 1024 * 1024,
+        )?;
+        let text = format!(
+            "{}\n{}\n{}",
+            include_str!("../THIRD_PARTY_NOTICES.md"),
+            include_str!("../docs/licenses/musl.txt"),
+            String::from_utf8(runtime)?
+        );
+        if cli.json {
+            emit(&cli, "licenses", serde_json::json!(text));
+        } else {
+            print!("{text}");
+        }
         return Ok(());
     }
     let config = identity::config_dir(cli.config_dir.clone())?;

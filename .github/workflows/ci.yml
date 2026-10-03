@@ -108,6 +108,8 @@ jobs:
           cd dist
           cat *.sha256 > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
-          TAG=v0.1.0-rc.1
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('../Cargo.toml','rb'))['package']['version'])")
+          TAG="v$VERSION"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          test "$TAG" = "v$VERSION"
           gh release create "$TAG" *.zip *.tar.gz SHA256SUMS.txt --target "$COMMIT" --title "clipx $TAG" --notes-file ../docs/RELEASE_NOTES.md --prerelease
