@@ -12,7 +12,7 @@ binary = str(pathlib.Path(sys.argv[1]).resolve())
 size = (1 << 32) + 17
 
 def run(config, *args):
-    return subprocess.run([binary, '--config-dir', str(config), '--json', *map(str, args)], capture_output=True, text=True, check=True)
+    return subprocess.run([binary, '--json', *map(str, args)], capture_output=True, text=True, check=True)
 
 def digest(path):
     h = hashlib.sha256()
@@ -24,10 +24,6 @@ def digest(path):
 with tempfile.TemporaryDirectory(prefix='clipx-large-') as tmp:
     root = pathlib.Path(tmp)
     sc, rc, dl = [root / n for n in ['sender', 'receiver', 'downloads']]
-    sfp = json.loads(run(sc, 'fingerprint').stdout)['data']['blake3_cert']
-    rfp = json.loads(run(rc, 'fingerprint').stdout)['data']['blake3_cert']
-    run(sc, 'peer', 'trust', rfp, '--host', '127.0.0.1')
-    run(rc, 'peer', 'trust', sfp)
     source = root / 'over-4GiB.bin'
     with source.open('wb') as f:
         f.truncate(size)
@@ -39,14 +35,14 @@ with tempfile.TemporaryDirectory(prefix='clipx-large-') as tmp:
         s.bind(('127.0.0.1', 0))
         port = s.getsockname()[1]
     with (root / 'receiver.log').open('w+') as log:
-        server = subprocess.Popen([binary, '--config-dir', str(rc), '--downloads', str(dl), '--port', str(port), 'recv', '--bind', '127.0.0.1', '--headless'], stdout=log, stderr=log)
+        server = subprocess.Popen([binary, '--downloads', str(dl), '--port', str(port), 'recv', '--yes', '--bind', '127.0.0.1', '--headless'], stdout=log, stderr=log)
         try:
             for _ in range(100):
                 time.sleep(.05)
                 if 'listening' in (root / 'receiver.log').read_text():
                     break
             start = time.perf_counter()
-            out = run(sc, '--port', port, 'send', '127.0.0.1', '--path', source, '--transport', 'quic', '--compression', 'zstd')
+            out = run(sc, '--port', port, 'send', '--yes', '127.0.0.1', '--path', source, '--transport', 'quic', '--compression', 'zstd')
             done = next(json.loads(line)['data'] for line in out.stdout.splitlines() if json.loads(line)['event'] == 'verified')
             dest = pathlib.Path(done['paths'][0])
             assert dest.stat().st_size == size

@@ -1,5 +1,5 @@
 use crate::{
-    identity::{Identity, Trust},
+    identity::Identity,
     paths,
     protocol::{self, CHUNK, Entry, Kind, Msg, Offer},
     transport::{Session, Wire},
@@ -24,21 +24,26 @@ pub struct Progress {
     pub verified: AtomicU64,
     pub resumed: AtomicU64,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
+pub enum Source {
+    File(PathBuf),
+    Memory(Arc<[u8]>),
+}
+#[derive(Clone)]
 pub struct Plan {
     pub offer: Offer,
     pub entries: Vec<Entry>,
-    pub sources: Vec<PathBuf>,
+    pub sources: Vec<Source>,
 }
 #[derive(Serialize, Deserialize, Clone)]
 struct Stored {
-    owner: String,
+    format: String,
     offer: Offer,
     entries: Vec<Entry>,
 }
 #[derive(Serialize, Deserialize)]
 struct Receipt {
-    owner: String,
+    format: String,
     manifest: String,
     paths: Vec<String>,
 }
@@ -71,6 +76,32 @@ fn open_regular(path: &Path, write: bool) -> Result<File> {
     Ok(f)
 }
 impl Plan {
+    pub fn clipboard(kind: Kind, data: Vec<u8>) -> Result<Self> {
+        let path = match kind {
+            Kind::Text => "clipboard.txt",
+            Kind::Image => "clipboard.png",
+            Kind::Files => bail!("expected clipboard payload"),
+        };
+        let size = data.len() as u64;
+        let entries = vec![Entry {
+            path: path.into(),
+            size,
+            directory: false,
+            modified: 0,
+            modified_ns: 0,
+        }];
+        Ok(Self {
+            offer: Offer {
+                id: uuid::Uuid::new_v4(),
+                kind,
+                count: 1,
+                total: size,
+            },
+            entries,
+            sources: vec![Source::Memory(Arc::from(data))],
+        })
+    }
+
     pub fn scan(inputs: &[PathBuf], kind: Kind) -> Result<Self> {
         let mut entries = Vec::new();
         let mut sources = Vec::new();
@@ -130,12 +161,15 @@ impl Plan {
                     modified: stamp(&m),
                     modified_ns: stamp_ns(&m),
                 });
-                sources.push(p.to_path_buf());
+                sources.push(Source::File(p.to_path_buf()));
             }
         }
         if entries.is_empty() {
             bail!("nothing to send");
         }
+        let mut paired: Vec<_> = entries.into_iter().zip(sources).collect();
+        paired.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+        let (entries, sources): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
         paths::validate_manifest(&entries)?;
         Ok(Self {
             offer: Offer {
@@ -266,35 +300,53 @@ async fn blocking_heartbeat<T: Send + 'static>(
         tokio::select! {r=&mut task=>return r?,_=tick.tick()=>{w.send(&Msg::Busy).await?;},}
     }
 }
+enum Input {
+    File(File),
+    Memory(std::io::Cursor<Arc<[u8]>>),
+}
+impl Read for Input {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::File(f) => f.read(b),
+            Self::Memory(c) => std::io::Read::read(c, b),
+        }
+    }
+}
+impl Input {
+    fn check(&self, e: &Entry) -> Result<()> {
+        if let Self::File(f) = self {
+            let m = f.metadata()?;
+            if m.len() != e.size || stamp(&m) != e.modified || stamp_ns(&m) != e.modified_ns {
+                bail!("source changed during transfer");
+            }
+        }
+        Ok(())
+    }
+}
 async fn send_file(
     w: &mut Wire,
     index: usize,
     entry: &Entry,
-    source: &Path,
+    source: &Source,
     compression: &str,
     progress: Arc<Progress>,
 ) -> Result<()> {
     w.send(&Msg::File { index }).await?;
-    let offset = match w.recv().await? {
-        Msg::Resume { offset } => offset,
+    let (mut offset, prefix) = match w.recv().await? {
+        Msg::Resume { offset, hash } => (offset, hash),
         _ => bail!("expected resume offset"),
     };
     if offset > entry.size || (offset != entry.size && offset % CHUNK as u64 != 0) {
         bail!("invalid resume range");
     }
-    let src = source.to_owned();
+    let src = source.clone();
     let expected = entry.clone();
-    progress.resumed.fetch_add(offset, Ordering::Relaxed);
-    progress.verified.fetch_add(offset, Ordering::Relaxed);
-    let (file, mut hasher) = blocking_heartbeat(w, move |cancel| {
-        let mut file = open_regular(&src, false)?;
-        let meta = file.metadata()?;
-        if meta.len() != expected.size
-            || stamp(&meta) != expected.modified
-            || stamp_ns(&meta) != expected.modified_ns
-        {
-            bail!("source changed since scan: {}", src.display());
-        }
+    let (mut input, mut hasher) = blocking_heartbeat(w, move |cancel| {
+        let mut input = match src {
+            Source::File(p) => Input::File(open_regular(&p, false)?),
+            Source::Memory(b) => Input::Memory(std::io::Cursor::new(b)),
+        };
+        input.check(&expected)?;
         let mut hash = blake3::Hasher::new();
         let mut buf = vec![0; CHUNK];
         let mut left = offset;
@@ -303,30 +355,48 @@ async fn send_file(
                 bail!("verification cancelled");
             }
             let n = left.min(CHUNK as u64) as usize;
-            file.read_exact(&mut buf[..n])?;
+            input.read_exact(&mut buf[..n])?;
             hash.update(&buf[..n]);
             left -= n as u64;
         }
-        Ok((file, hash))
+        Ok((input, hash))
     })
     .await?;
-    let mut file = tokio::fs::File::from_std(file);
+    if hasher.finalize().to_hex().as_str() != prefix {
+        // A same-size/same-time file is not necessarily the same content.
+        // Never splice a checkpoint from a different source into this transfer.
+        w.send(&Msg::RestartFile).await?;
+        if !matches!(w.recv().await?, Msg::Ack) {
+            bail!("expected restart acknowledgement");
+        }
+        match &mut input {
+            Input::File(f) => {
+                f.seek(SeekFrom::Start(0))?;
+            }
+            Input::Memory(c) => c.set_position(0),
+        }
+        hasher = blake3::Hasher::new();
+        offset = 0;
+    }
+    progress.resumed.fetch_add(offset, Ordering::Relaxed);
+    progress.verified.fetch_add(offset, Ordering::Relaxed);
     let mut at = offset;
-    let mut pending = 0usize;
-    let mut pending_bytes = 0u64;
+    let mut pending = 0;
+    let mut pending_bytes = 0;
     while at < entry.size {
         let n = (entry.size - at).min(CHUNK as u64) as usize;
-        let mut buf = vec![0; n];
-        file.read_exact(&mut buf).await?;
         let mode = compression.to_owned();
-        let (encoded, compressed, digest, new_hash) = blocking(move || {
+        let (encoded, compressed, digest, next_input, next_hash) = blocking(move || {
+            let mut buf = vec![0; n];
+            input.read_exact(&mut buf)?;
             hasher.update(&buf);
             let digest = blake3::hash(&buf).to_hex().to_string();
             let (e, c) = protocol::encode(&buf, &mode)?;
-            Ok((e, c, digest, hasher))
+            Ok((e, c, digest, input, hasher))
         })
         .await?;
-        hasher = new_hash;
+        input = next_input;
+        hasher = next_hash;
         w.send(&Msg::Chunk {
             offset: at,
             logical: n,
@@ -353,10 +423,7 @@ async fn send_file(
             pending_bytes = 0;
         }
     }
-    let m = file.metadata().await?;
-    if m.len() != entry.size || stamp(&m) != entry.modified || stamp_ns(&m) != entry.modified_ns {
-        bail!("source modified during transfer");
-    }
+    input.check(entry)?;
     w.send(&Msg::FileDone {
         hash: hasher.finalize().to_hex().to_string(),
     })
@@ -400,10 +467,26 @@ async fn recv_worker(
         .await?;
         w.send(&Msg::Resume {
             offset: active.offset,
+            hash: active.hasher.finalize().to_hex().to_string(),
         })
         .await?;
+        let mut may_restart = true;
         loop {
             match w.recv().await? {
+                Msg::RestartFile if may_restart => {
+                    active = blocking(move || {
+                        active.file.set_len(0)?;
+                        active.file.seek(SeekFrom::Start(0))?;
+                        active.journal.set_len(0)?;
+                        active.journal.seek(SeekFrom::Start(0))?;
+                        active.hasher = blake3::Hasher::new();
+                        active.offset = 0;
+                        Ok(active)
+                    })
+                    .await?;
+                    may_restart = false;
+                    w.send(&Msg::Ack).await?;
+                }
                 Msg::Chunk {
                     offset,
                     logical,
@@ -411,6 +494,7 @@ async fn recv_worker(
                     compressed,
                     hash,
                 } => {
+                    may_restart = false;
                     if logical == 0 || logical > CHUNK || encoded == 0 || encoded > CHUNK {
                         bail!("invalid chunk size");
                     }
@@ -473,7 +557,18 @@ async fn receive_complete(w: &mut Wire, mut msg: Msg) -> Result<Vec<String>> {
         }
         result.extend(paths);
         if done {
-            w.send(&Msg::Ack).await?;
+            let cleanup = async {
+                w.send(&Msg::Ack).await?;
+                if !matches!(w.recv().await?, Msg::Cleaned) {
+                    bail!("expected cleanup confirmation");
+                }
+                w.send(&Msg::Ack).await
+            };
+            if let Err(e) = cleanup.await {
+                eprintln!(
+                    "Transfer verified and committed; checkpoint cleanup unconfirmed: {e}. Do not resend solely for this warning."
+                );
+            }
             return Ok(result);
         }
         msg = w.recv().await?;
@@ -492,6 +587,9 @@ pub async fn send_session_progress(
     compression: &str,
     progress: Arc<Progress>,
 ) -> Result<Vec<String>> {
+    if !s.authorized {
+        bail!("session not mutually approved");
+    }
     s.ctrl.send(&Msg::Offer(plan.offer.clone())).await?;
     for entry in &plan.entries {
         s.ctrl.send(&Msg::Entry(entry.clone())).await?;
@@ -557,9 +655,24 @@ pub async fn send_session_progress(
     let msg = s.ctrl.recv().await?;
     receive_complete(&mut s.ctrl, msg).await
 }
+fn resume_digest(kind: &Kind, entries: &[Entry]) -> Result<String> {
+    Ok(blake3::hash(&serde_json::to_vec(&(kind, entries))?)
+        .to_hex()
+        .to_string())
+}
+fn stage_lock(stage: &Path) -> Result<File> {
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(stage.join("lock"))?;
+    fs2::FileExt::try_lock_exclusive(&f).context("matching transfer is active")?;
+    Ok(f)
+}
 fn prepare(
     downloads: &Path,
-    owner: &str,
+    format: &str,
     offer: &Offer,
     entries: &[Entry],
 ) -> Result<(PathBuf, File, Option<Vec<String>>)> {
@@ -570,64 +683,78 @@ fn prepare(
         bail!("manifest totals mismatch");
     }
     if offer.kind != Kind::Files && (entries.len() != 1 || entries[0].directory) {
-        bail!("clipboard transfer must contain exactly one file");
+        bail!("clipboard transfer must contain one file");
     }
     if offer.kind == Kind::Text && entries[0].path != "clipboard.txt" {
-        bail!("text payload filename must be clipboard.txt");
+        bail!("invalid text filename");
     }
     if offer.kind == Kind::Image && entries[0].path != "clipboard.png" {
-        bail!("image payload filename must be clipboard.png");
+        bail!("invalid image filename");
     }
-    let state = downloads.join(".clipx-state");
-    paths::private_dir(&state)?;
-    for sub in ["partials", "receipts", "locks"] {
-        paths::private_dir(&state.join(sub))?;
-    }
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(state.join("locks").join(offer.id.to_string()))?;
-    fs2::FileExt::try_lock_exclusive(&lock).context("transfer already active")?;
-    let receipt_path = state.join("receipts").join(format!("{}.json", offer.id));
-    let stage = state.join("partials").join(offer.id.to_string());
-    if receipt_path.exists() {
-        let r: Receipt = serde_json::from_reader(File::open(receipt_path)?)?;
-        if r.owner != owner || r.manifest != manifest_hash(offer, entries)? {
-            bail!("transfer ID ownership/content mismatch");
+    let digest = resume_digest(&offer.kind, entries)?;
+    let direct = downloads.join(format!(".clipx-part-{}", offer.id));
+    let mut selected = None;
+    if direct.exists() {
+        paths::private_dir(&direct)?;
+        selected = Some((direct.clone(), stage_lock(&direct)?));
+    } else {
+        for item in fs::read_dir(downloads)? {
+            let item = item?;
+            let name = item.file_name();
+            let name = name.to_string_lossy();
+            if !name
+                .strip_prefix(".clipx-part-")
+                .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+                || !item.file_type()?.is_dir()
+            {
+                continue;
+            }
+            let candidate = item.path();
+            if candidate.join("finalize.json").exists() {
+                continue;
+            }
+            let marker = candidate.join("resume.json");
+            if !fs::metadata(&marker).is_ok_and(|m| m.len() < 256) {
+                continue;
+            }
+            let Ok(saved) = serde_json::from_reader::<_, String>(File::open(marker)?) else {
+                continue;
+            };
+            if saved != digest {
+                continue;
+            }
+            if let Ok(lock) = stage_lock(&candidate) {
+                selected = Some((candidate, lock));
+                break;
+            }
         }
-        return Ok((stage, lock, Some(r.paths)));
     }
-    paths::private_dir(&stage)?;
+    let (stage, lock) = match selected {
+        Some(x) => x,
+        None => {
+            paths::private_dir(&direct)?;
+            let lock = stage_lock(&direct)?;
+            (direct, lock)
+        }
+    };
     let statefile = stage.join("state.json");
     if statefile.exists() {
         let old: Stored = serde_json::from_reader(File::open(&statefile)?)?;
-        if old.owner != owner || old.offer != *offer || old.entries != entries {
-            bail!("transfer ID ownership/content mismatch");
+        if old.format != format || old.entries != entries || old.offer.kind != offer.kind {
+            bail!("checkpoint manifest mismatch");
         }
-    } else {
-        paths::atomic_json(
-            &statefile,
-            &Stored {
-                owner: owner.into(),
-                offer: offer.clone(),
-                entries: entries.to_vec(),
-            },
-        )?;
     }
-    // A crash during finalization must complete the journaled rename transaction,
-    // never recreate zero-byte source staging files or duplicate an already committed root.
+    let stored = Stored {
+        format: format.into(),
+        offer: offer.clone(),
+        entries: entries.to_vec(),
+    };
+    paths::atomic_json(&statefile, &stored)?;
+    paths::atomic_json(&stage.join("resume.json"), &digest)?;
     if stage.join("finalize.json").exists() {
-        let stored = Stored {
-            owner: owner.into(),
-            offer: offer.clone(),
-            entries: entries.to_vec(),
-        };
         let output = finish_commit(downloads, &stage, &stored)?;
         return Ok((stage, lock, Some(output)));
     }
-    // Conservative sanity check; existing partial bytes reduce required additional space.
     let mut have = 0u64;
     for (i, e) in entries.iter().enumerate() {
         if !e.directory {
@@ -742,73 +869,77 @@ fn commit_files(downloads: &Path, stage: &Path, stored: &Stored) -> Result<Vec<S
     Ok(out)
 }
 fn finish_commit(downloads: &Path, stage: &Path, stored: &Stored) -> Result<Vec<String>> {
+    let saved = stage.join("receipt.json");
+    if saved.exists() {
+        let receipt: Receipt = serde_json::from_reader(File::open(saved)?)?;
+        if receipt.manifest != manifest_hash(&stored.offer, &stored.entries)? {
+            bail!("receipt mismatch");
+        }
+        return Ok(receipt.paths);
+    }
     let clipboard_output: Option<Vec<String>> =
         serde_json::from_reader(File::open(stage.join("finalize.json"))?)?;
     let output = match clipboard_output {
         Some(p) => p,
         None => commit_files(downloads, stage, stored)?,
     };
-    let receipt = Receipt {
-        owner: stored.owner.clone(),
-        manifest: manifest_hash(&stored.offer, &stored.entries)?,
-        paths: output.clone(),
-    };
     paths::atomic_json(
-        &downloads
-            .join(".clipx-state/receipts")
-            .join(format!("{}.json", stored.offer.id)),
-        &receipt,
+        &saved,
+        &Receipt {
+            format: stored.format.clone(),
+            manifest: manifest_hash(&stored.offer, &stored.entries)?,
+            paths: output.clone(),
+        },
     )?;
-    fs::remove_dir_all(stage)?;
     Ok(output)
 }
 pub struct Receiver {
     pub downloads: PathBuf,
     pub headless: bool,
-    pub pairing: bool,
-    pub config: PathBuf,
     pub clipboard: crate::clipboard::Writer,
     pub concurrency: usize,
+    pub approval: crate::pairing::Approval,
 }
 pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> Result<()> {
-    let pair = match s.ctrl.recv().await? {
+    let name = match s.ctrl.recv().await? {
         Msg::Hello {
             version,
             chunk,
-            pair,
-            device,
             name,
+            device,
+            ..
         } => {
             protocol::check_version(version, chunk)?;
-            if device.len() > 128 || name.len() > 128 {
+            if name.len() > 128 || device.len() > 128 {
                 bail!("identity field limit");
             }
-            pair
+            name
         }
         _ => bail!("expected hello"),
     };
-    let trust = Trust::load(&options.config)?;
-    if !trust.fingerprints.contains(&s.fingerprint) && !(pair && options.pairing) {
-        bail!("sender not trusted; receiver must run peer trust with sender fingerprint");
-    }
+    let nonce = uuid::Uuid::new_v4().to_string();
     s.ctrl
         .send(&Msg::Ready {
-            version: 1,
+            version: 2,
             device: id.id.clone(),
             name: id.name.clone(),
             chunk: CHUNK,
+            pairing_confirmation: true,
+            session_nonce: nonce.clone(),
         })
         .await?;
-    if pair {
-        eprintln!(
-            "Pair probe: {}. Trust this fingerprint locally only after verifying it on the other device.",
-            s.fingerprint
-        );
-        if !matches!(s.ctrl.recv().await?, Msg::Ack) {
-            bail!("expected pairing acknowledgement");
-        }
-        return Ok(());
+    if !matches!(s.ctrl.recv().await?, Msg::PairStart) {
+        bail!("expected selected session approval");
     }
+    let code = crate::pairing::session_code(&id.fp(), &s.fingerprint, &nonce, &s.binding);
+    if !crate::pairing::exchange(&mut s.ctrl, &options.approval, &code, &name).await? {
+        bail!("session declined; no payload accepted");
+    }
+    s.ctrl.send(&Msg::SessionApproved).await?;
+    if !matches!(s.ctrl.recv().await?, Msg::Ack) {
+        bail!("expected approval acknowledgement");
+    }
+    s.authorized = true;
     let offer = match s.ctrl.recv().await? {
         Msg::Offer(o) if o.count > 0 && o.count <= protocol::MAX_ENTRIES => o,
         _ => bail!("invalid transfer offer"),
@@ -828,18 +959,28 @@ pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> 
         }
     }
     let stored = Stored {
-        owner: s.fingerprint.clone(),
+        format: "clipx/2".into(),
         offer: offer.clone(),
         entries: entries.clone(),
     };
     let dl = options.downloads.clone();
     let copy = stored.clone();
     let (stage, _lock, receipt) =
-        blocking(move || prepare(&dl, &copy.owner, &copy.offer, &copy.entries)).await?;
+        blocking(move || prepare(&dl, &copy.format, &copy.offer, &copy.entries)).await?;
     let guard = Arc::new(_lock);
     if let Some(paths) = receipt {
         send_complete(&mut s.ctrl, paths).await?;
-        let _ = s.ctrl.recv().await;
+        if matches!(s.ctrl.recv().await, Ok(Msg::Ack)) {
+            drop(guard);
+            let cleanup = stage.clone();
+            blocking(move || {
+                fs::remove_dir_all(cleanup)?;
+                Ok(())
+            })
+            .await?;
+            s.ctrl.send(&Msg::Cleaned).await?;
+            let _ = s.ctrl.recv().await;
+        }
         return Ok(());
     }
     let workers = if s.conn.is_some() {
@@ -930,119 +1071,69 @@ pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> 
     }
     let dl = options.downloads.clone();
     let st = stage.clone();
+    let commit_guard = guard.clone();
     let paths = blocking(move || {
-        let _guard = guard;
+        let _guard = commit_guard;
         paths::atomic_json(&st.join("finalize.json"), &paths_out)?;
         finish_commit(&dl, &st, &stored)
     })
     .await?;
     send_complete(&mut s.ctrl, paths).await?;
-    let _ = s.ctrl.recv().await;
+    if matches!(s.ctrl.recv().await, Ok(Msg::Ack)) {
+        drop(guard);
+        blocking(move || {
+            fs::remove_dir_all(stage)?;
+            Ok(())
+        })
+        .await?;
+        s.ctrl.send(&Msg::Cleaned).await?;
+        let _ = s.ctrl.recv().await;
+    }
     Ok(())
 }
 pub fn cleanup(downloads: &Path, days: u64) -> Result<usize> {
-    let state = downloads.join(".clipx-state");
-    let mut count = 0;
-    for sub in ["partials", "receipts"] {
-        let dir = state.join(sub);
-        if !dir.exists() {
-            continue;
-        }
-        for e in fs::read_dir(dir)? {
-            let e = e?;
-            let meta = fs::symlink_metadata(e.path())?;
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-            let age = SystemTime::now()
-                .duration_since(meta.modified()?)
-                .unwrap_or_default();
-            if age < Duration::from_secs(days.saturating_mul(86400)) {
-                continue;
-            }
-            let name = e
-                .file_name()
-                .to_string_lossy()
-                .trim_end_matches(".json")
-                .to_owned();
-            if uuid::Uuid::parse_str(&name).is_err() {
-                continue;
-            }
-            let lp = state.join("locks").join(name);
-            let lock = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(lp)?;
-            if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
-                continue;
-            }
-            if meta.is_dir() {
-                fs::remove_dir_all(e.path())?;
-            } else {
-                fs::remove_file(e.path())?;
-            }
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-pub fn cleanup_outgoing(config: &Path, days: u64) -> Result<usize> {
-    let dir = config.join("outgoing");
-    if !dir.exists() {
+    if !downloads.exists() {
         return Ok(0);
     }
     let mut count = 0;
-    for item in fs::read_dir(&dir)? {
+    for item in fs::read_dir(downloads)? {
         let item = item?;
-        let path = item.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json")
-            || item.file_type()?.is_symlink()
+        let name = item.file_name();
+        let name = name.to_string_lossy();
+        if !name
+            .strip_prefix(".clipx-part-")
+            .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+            || !item.file_type()?.is_dir()
         {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        let stage = item.path();
+        let Ok(lock) = stage_lock(&stage) else {
             continue;
         };
-        let Ok(id) = uuid::Uuid::parse_str(stem) else {
-            continue;
-        };
-        if SystemTime::now()
-            .duration_since(item.metadata()?.modified()?)
-            .unwrap_or_default()
+        let mut latest = item.metadata()?.modified()?;
+        for child in fs::read_dir(&stage)? {
+            let child = child?;
+            if let Ok(t) = child.metadata().and_then(|m| m.modified()) {
+                latest = latest.max(t);
+            }
+        }
+        if SystemTime::now().duration_since(latest).unwrap_or_default()
             < Duration::from_secs(days.saturating_mul(86400))
         {
             continue;
         }
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(dir.join(format!("{id}.lock")))?;
-        if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
+        let Ok(saved) = serde_json::from_reader::<_, Stored>(File::open(stage.join("state.json"))?)
+        else {
+            continue;
+        };
+        if saved.format != "clipx/2" {
             continue;
         }
-        let plan: Plan = serde_json::from_reader(File::open(&path)?)?;
-        if plan.offer.kind != Kind::Files {
-            for source in &plan.sources {
-                if let Some(parent) = source.parent() {
-                    // Never remove arbitrary original files referenced in an outgoing plan.
-                    if parent.parent() == Some(dir.as_path())
-                        && parent
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .is_some_and(|n| uuid::Uuid::parse_str(n).is_ok())
-                        && !fs::symlink_metadata(parent)?.file_type().is_symlink()
-                    {
-                        fs::remove_dir_all(parent)?;
-                    }
-                }
-            }
-        }
-        fs::remove_file(path)?;
+        let deleting = downloads.join(format!(".clipx-cleanup-{}", uuid::Uuid::new_v4()));
+        paths::rename_noreplace(&stage, &deleting)?;
+        drop(lock);
+        fs::remove_dir_all(deleting)?;
         count += 1;
     }
     Ok(count)
@@ -1131,11 +1222,11 @@ mod tests {
             modified_ns: 0,
         }];
         let stored = Stored {
-            owner: "owner".into(),
+            format: "clipx/2".into(),
             offer: offer.clone(),
             entries: entries.clone(),
         };
-        let (stage, lock, _) = prepare(root.path(), "owner", &offer, &entries)?;
+        let (stage, lock, _) = prepare(root.path(), "clipx/2", &offer, &entries)?;
         let hash = blake3::hash(b"success").to_hex().to_string();
         {
             let mut a = ActiveFile::open(&stage, 0, 7)?;
@@ -1147,7 +1238,7 @@ mod tests {
         let first = commit_files(root.path(), &stage, &stored)?;
         drop(lock);
         // Crash point: root has moved, but no receipt was written yet.
-        let (_, lock, second) = prepare(root.path(), "owner", &offer, &entries)?;
+        let (_, lock, second) = prepare(root.path(), "clipx/2", &offer, &entries)?;
         assert_eq!(Some(first), second);
         assert_eq!(fs::read(root.path().join("result"))?, b"success");
         assert!(!root.path().join("result (1)").exists());
@@ -1174,6 +1265,8 @@ mod tests {
         let task = tokio::spawn(async move {
             send_complete(&mut sender, paths).await?;
             assert!(matches!(sender.recv().await?, Msg::Ack));
+            sender.send(&Msg::Cleaned).await?;
+            assert!(matches!(sender.recv().await?, Msg::Ack));
             Ok::<_, anyhow::Error>(())
         });
         let first = receiver.recv().await?;
@@ -1198,7 +1291,7 @@ mod tests {
             modified: 0,
             modified_ns: 0,
         }];
-        let (stage, lock, _) = prepare(root.path(), "owner", &offer, &entries)?;
+        let (stage, lock, _) = prepare(root.path(), "clipx/2", &offer, &entries)?;
         assert_eq!(cleanup(root.path(), 0)?, 0);
         assert!(stage.exists());
         drop(lock);

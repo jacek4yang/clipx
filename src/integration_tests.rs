@@ -1,10 +1,10 @@
-use anyhow::Result;
-use clipx::{
-    identity::{Identity, Trust},
+use crate::{
+    identity::Identity,
     protocol::{CHUNK, Kind, Msg},
     transfer::{self, Plan, Receiver},
     transport,
 };
+use anyhow::Result;
 use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 struct Fixture {
@@ -18,14 +18,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Result<Self> {
         let root = tempfile::tempdir()?;
-        let sc = root.path().join("sender");
-        let rc = root.path().join("receiver");
-        let sender = Arc::new(Identity::load(&sc)?);
-        let receiver = Arc::new(Identity::load(&rc)?);
-        Trust::edit(&rc, |t| {
-            t.fingerprints.insert(sender.fp());
-            Ok(())
-        })?;
+        let sender = Arc::new(Identity::ephemeral()?);
+        let receiver = Arc::new(Identity::ephemeral()?);
         let input = root.path().join("input");
         fs::create_dir(&input)?;
         let dl = root.path().join("downloads");
@@ -36,10 +30,9 @@ impl Fixture {
         let options = Arc::new(Receiver {
             downloads: dl,
             headless: true,
-            pairing: false,
-            config: rc,
-            clipboard: clipx::clipboard::writer(),
+            clipboard: crate::clipboard::writer(),
             concurrency: 4,
+            approval: crate::pairing::Approval::testing(true),
         });
         Ok(Self {
             _root: root,
@@ -59,10 +52,9 @@ impl Fixture {
     async fn server(&self, mode: &str) -> Result<tokio::task::JoinHandle<()>> {
         let id = self.receiver.clone();
         let options = self.options.clone();
-        let trust = Trust::load(&options.config)?;
         let addr = ([127, 0, 0, 1], self.port).into();
         if mode == "quic" {
-            let endpoint = transport::server_endpoint(addr, &id, &trust, false)?;
+            let endpoint = transport::server_endpoint(addr, &id)?;
             Ok(tokio::spawn(async move {
                 while let Some(i) = endpoint.accept().await {
                     let id = id.clone();
@@ -83,7 +75,7 @@ impl Fixture {
             }))
         } else {
             let listener = tokio::net::TcpListener::bind(addr).await?;
-            let tls = Arc::new(id.server_config(trust.fingerprints, false)?);
+            let tls = Arc::new(id.server_config()?);
             Ok(tokio::spawn(async move {
                 while let Ok((socket, _)) = listener.accept().await {
                     let id = id.clone();
@@ -106,15 +98,14 @@ impl Fixture {
         }
     }
     async fn connect(&self, mode: &str) -> Result<transport::Session> {
-        transport::connect(
-            "127.0.0.1",
-            self.port,
-            mode,
+        let mut s = transport::connect("127.0.0.1", self.port, mode, &self.sender, true).await?;
+        crate::pairing::authorize(
+            &mut s,
             &self.sender,
-            Some(self.receiver.fp()),
-            false,
+            &crate::pairing::Approval::testing(true),
         )
-        .await
+        .await?;
+        Ok(s)
     }
 }
 #[tokio::test]
@@ -153,9 +144,6 @@ async fn run_tree(server: &str, client: &str) -> Result<()> {
         32
     );
     let mut s = f.connect(client).await?;
-    assert_eq!(transfer::send_session(&mut s, plan, "off").await?, paths);
-    drop(s);
-    let mut s = f.connect(client).await?;
     let second = transfer::send_session(&mut s, f.plan()?, "off").await?;
     assert!(second[0].ends_with("input (1)"));
     assert!(PathBuf::from(&paths[0]).is_dir());
@@ -164,7 +152,7 @@ async fn run_tree(server: &str, client: &str) -> Result<()> {
 }
 #[tokio::test]
 async fn interrupted_tcp_resumes_on_quic() -> Result<()> {
-    let f = Fixture::new()?;
+    let mut f = Fixture::new()?;
     fs::write(f.input.join("big"), vec![71; CHUNK * 3 + 55])?;
     let plan = f.plan()?;
     let task = f.server("tcp").await?;
@@ -175,7 +163,10 @@ async fn interrupted_tcp_resumes_on_quic() -> Result<()> {
     }
     assert!(matches!(s.ctrl.recv().await?, Msg::Accept { .. }));
     s.ctrl.send(&Msg::File { index: 1 }).await?;
-    assert!(matches!(s.ctrl.recv().await?, Msg::Resume { offset: 0 }));
+    assert!(matches!(
+        s.ctrl.recv().await?,
+        Msg::Resume { offset: 0, .. }
+    ));
     let data = vec![71; CHUNK];
     s.ctrl
         .send(&Msg::Chunk {
@@ -196,12 +187,19 @@ async fn interrupted_tcp_resumes_on_quic() -> Result<()> {
     let stage = f
         .options
         .downloads
-        .join(".clipx-state/partials")
-        .join(plan.offer.id.to_string());
+        .join(format!(".clipx-part-{}", plan.offer.id));
     assert_eq!(fs::metadata(stage.join("file-1"))?.len(), CHUNK as u64);
+    f.sender = Arc::new(Identity::ephemeral()?);
+    f.receiver = Arc::new(Identity::ephemeral()?);
+    let plan = f.plan()?;
     let task = f.server("quic").await?;
     let mut s = f.connect("quic").await?;
-    let paths = transfer::send_session(&mut s, plan, "zstd").await?;
+    let progress = Arc::new(transfer::Progress::default());
+    let paths = transfer::send_session_progress(&mut s, plan, "zstd", progress.clone()).await?;
+    assert_eq!(
+        progress.resumed.load(std::sync::atomic::Ordering::Relaxed),
+        CHUNK as u64
+    );
     assert_eq!(
         fs::read(PathBuf::from(&paths[0]).join("big"))?,
         vec![71; CHUNK * 3 + 55]
@@ -211,40 +209,98 @@ async fn interrupted_tcp_resumes_on_quic() -> Result<()> {
     Ok(())
 }
 #[tokio::test]
-async fn trust_changed_and_unknown_fail() -> Result<()> {
+async fn same_metadata_different_content_restarts_file() -> Result<()> {
+    let mut f = Fixture::new()?;
+    fs::write(f.input.join("big"), vec![71; CHUNK * 3 + 55])?;
+    let plan = f.plan()?;
+    let task = f.server("tcp").await?;
+    let mut s = f.connect("tcp").await?;
+    s.ctrl.send(&Msg::Offer(plan.offer.clone())).await?;
+    for e in &plan.entries {
+        s.ctrl.send(&Msg::Entry(e.clone())).await?;
+    }
+    assert!(matches!(s.ctrl.recv().await?, Msg::Accept { .. }));
+    s.ctrl.send(&Msg::File { index: 1 }).await?;
+    assert!(matches!(
+        s.ctrl.recv().await?,
+        Msg::Resume { offset: 0, .. }
+    ));
+    let data = vec![71; CHUNK];
+    s.ctrl
+        .send(&Msg::Chunk {
+            offset: 0,
+            logical: CHUNK,
+            encoded: CHUNK,
+            compressed: false,
+            hash: blake3::hash(&data).to_hex().to_string(),
+        })
+        .await?;
+    use tokio::io::AsyncWriteExt;
+    s.ctrl.w.write_all(&data).await?;
+    s.ctrl.w.flush().await?;
+    assert!(matches!(s.ctrl.recv().await?, Msg::Ack));
+    drop(s);
+    task.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let stage = f
+        .options
+        .downloads
+        .join(format!(".clipx-part-{}", plan.offer.id));
+    assert_eq!(fs::metadata(stage.join("file-1"))?.len(), CHUNK as u64);
+    let e = &plan.entries[1];
+    fs::write(f.input.join("big"), vec![72; CHUNK * 3 + 55])?;
+    filetime::set_file_mtime(
+        f.input.join("big"),
+        filetime::FileTime::from_unix_time(e.modified, e.modified_ns),
+    )?;
+    f.sender = Arc::new(Identity::ephemeral()?);
+    f.receiver = Arc::new(Identity::ephemeral()?);
+    let plan = f.plan()?;
+    let task = f.server("quic").await?;
+    let mut s = f.connect("quic").await?;
+    let progress = Arc::new(transfer::Progress::default());
+    let paths = transfer::send_session_progress(&mut s, plan, "zstd", progress.clone()).await?;
+    assert_eq!(
+        progress.resumed.load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        fs::read(PathBuf::from(&paths[0]).join("big"))?,
+        vec![72; CHUNK * 3 + 55]
+    );
+    assert!(!stage.exists());
+    task.abort();
+    Ok(())
+}
+#[tokio::test]
+async fn payload_without_confirmation_is_rejected() -> Result<()> {
     let f = Fixture::new()?;
     let task = f.server("tcp").await?;
+    let mut s = transport::connect("127.0.0.1", f.port, "tcp", &f.sender, true).await?;
+    s.ctrl
+        .send(&Msg::Offer(crate::protocol::Offer {
+            id: uuid::Uuid::new_v4(),
+            kind: Kind::Files,
+            count: 1,
+            total: 0,
+        }))
+        .await?;
+    assert!(s.ctrl.recv().await.is_err());
+    assert_eq!(fs::read_dir(&f.options.downloads)?.count(), 0);
+    task.abort();
+    Ok(())
+}
+#[tokio::test]
+async fn declined_session_does_not_write_state() -> Result<()> {
+    let f = Fixture::new()?;
+    let task = f.server("tcp").await?;
+    let mut s = transport::connect("127.0.0.1", f.port, "tcp", &f.sender, true).await?;
     assert!(
-        transport::connect(
-            "127.0.0.1",
-            f.port,
-            "tcp",
-            &f.sender,
-            Some("0".repeat(64)),
-            false
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        transport::connect("127.0.0.1", f.port, "tcp", &f.sender, None, false)
+        crate::pairing::authorize(&mut s, &f.sender, &crate::pairing::Approval::testing(false))
             .await
             .is_err()
     );
-    let dir = tempfile::tempdir()?;
-    let unknown = Identity::load(dir.path())?;
-    assert!(
-        transport::connect(
-            "127.0.0.1",
-            f.port,
-            "tcp",
-            &unknown,
-            Some(f.receiver.fp()),
-            false
-        )
-        .await
-        .is_err()
-    );
+    assert_eq!(fs::read_dir(&f.options.downloads)?.count(), 0);
     task.abort();
     Ok(())
 }
@@ -279,7 +335,7 @@ async fn malicious_path_rejected() -> Result<()> {
     let task = f.server("tcp").await?;
     let mut s = f.connect("tcp").await?;
     s.ctrl
-        .send(&Msg::Offer(clipx::protocol::Offer {
+        .send(&Msg::Offer(crate::protocol::Offer {
             id: uuid::Uuid::new_v4(),
             kind: Kind::Files,
             count: 1,
@@ -287,7 +343,7 @@ async fn malicious_path_rejected() -> Result<()> {
         }))
         .await?;
     s.ctrl
-        .send(&Msg::Entry(clipx::protocol::Entry {
+        .send(&Msg::Entry(crate::protocol::Entry {
             path: "../../escaped".into(),
             size: 0,
             directory: false,
@@ -307,7 +363,7 @@ async fn incomplete_clipboard_never_commits() -> Result<()> {
     let task = f.server("tcp").await?;
     let mut s = f.connect("tcp").await?;
     s.ctrl
-        .send(&Msg::Offer(clipx::protocol::Offer {
+        .send(&Msg::Offer(crate::protocol::Offer {
             id: uuid::Uuid::new_v4(),
             kind: Kind::Text,
             count: 1,
@@ -315,7 +371,7 @@ async fn incomplete_clipboard_never_commits() -> Result<()> {
         }))
         .await?;
     s.ctrl
-        .send(&Msg::Entry(clipx::protocol::Entry {
+        .send(&Msg::Entry(crate::protocol::Entry {
             path: "clipboard.txt".into(),
             size: 4,
             directory: false,
@@ -337,7 +393,7 @@ async fn corrupted_chunk_never_commits() -> Result<()> {
     let task = f.server("tcp").await?;
     let mut s = f.connect("tcp").await?;
     s.ctrl
-        .send(&Msg::Offer(clipx::protocol::Offer {
+        .send(&Msg::Offer(crate::protocol::Offer {
             id: uuid::Uuid::new_v4(),
             kind: Kind::Files,
             count: 1,
@@ -345,7 +401,7 @@ async fn corrupted_chunk_never_commits() -> Result<()> {
         }))
         .await?;
     s.ctrl
-        .send(&Msg::Entry(clipx::protocol::Entry {
+        .send(&Msg::Entry(crate::protocol::Entry {
             path: "bad".into(),
             size: 4,
             directory: false,
@@ -403,7 +459,7 @@ async fn explicit_pair_probe_both_transports() -> Result<()> {
     for mode in ["quic", "tcp"] {
         let f = Fixture::new()?;
         let task = f.server(mode).await?;
-        let s = transport::connect("127.0.0.1", f.port, mode, &f.sender, None, true).await?;
+        let s = transport::connect("127.0.0.1", f.port, mode, &f.sender, true).await?;
         assert_eq!(s.fingerprint, f.receiver.fp());
         task.abort();
     }

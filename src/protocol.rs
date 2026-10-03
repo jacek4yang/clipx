@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const ALPN: &[u8] = b"clipx/1";
+pub const ALPN: &[u8] = b"clipx/2";
 pub const CHUNK: usize = 1024 * 1024;
 pub const MAX_CONTROL: usize = 64 * 1024;
 pub const MAX_ENTRIES: usize = 100_000;
@@ -79,7 +79,15 @@ pub enum Msg {
         device: String,
         name: String,
         chunk: usize,
+        #[serde(default)]
+        pairing_confirmation: bool,
+        session_nonce: String,
     },
+    PairStart,
+    PairDecision {
+        accept: bool,
+    },
+    SessionApproved,
     Offer(Offer),
     Entry(Entry),
     Accept {
@@ -90,7 +98,9 @@ pub enum Msg {
     },
     Resume {
         offset: u64,
+        hash: String,
     },
+    RestartFile,
     Chunk {
         offset: u64,
         logical: usize,
@@ -99,6 +109,7 @@ pub enum Msg {
         hash: String,
     },
     Ack,
+    Cleaned,
     Busy,
     FileDone {
         hash: String,
@@ -116,7 +127,7 @@ pub enum Msg {
     },
 }
 pub fn check_version(version: u32, chunk: usize) -> Result<()> {
-    if version != 1 || chunk != CHUNK {
+    if version != 2 || chunk != CHUNK {
         return Err(Error::Invalid("incompatible protocol/chunk version"));
     }
     Ok(())
@@ -182,7 +193,7 @@ mod tests {
             assert!(decode(&encoded, data.len(), compressed, "bad").is_err());
             assert!(decode(&encoded, CHUNK + 1, compressed, &hash).is_err());
         }
-        assert!(check_version(2, CHUNK).is_err());
+        assert!(check_version(1, CHUNK).is_err());
         assert!(check_version(1, 1).is_err());
     }
 }

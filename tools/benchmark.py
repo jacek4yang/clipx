@@ -26,7 +26,7 @@ if a.mib < 1:
     p.error('--mib must be positive')
 
 def call(config, *args):
-    result = subprocess.run([binary, '--config-dir', str(config), '--json', *map(str, args)], capture_output=True, text=True, check=True)
+    result = subprocess.run([binary, '--json', *map(str, args)], capture_output=True, text=True, check=True)
     return [json.loads(line) for line in result.stdout.splitlines()]
 
 def hash_file(path):
@@ -39,10 +39,6 @@ def hash_file(path):
 with tempfile.TemporaryDirectory(prefix='clipx-bench-') as td:
     root = pathlib.Path(td)
     sender, receiver, downloads = [root / n for n in ['sender', 'receiver', 'downloads']]
-    fp_s = call(sender, 'fingerprint')[0]['data']['blake3_cert']
-    fp_r = call(receiver, 'fingerprint')[0]['data']['blake3_cert']
-    call(sender, 'peer', 'trust', fp_r, '--host', '127.0.0.1')
-    call(receiver, 'peer', 'trust', fp_s)
     rng = random.Random(1)
     paths = []
     for name, compressible in [('compressible', True), ('incompressible', False)]:
@@ -60,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='clipx-bench-') as td:
         s.bind(('127.0.0.1', 0))
         port = s.getsockname()[1]
     log = (root / 'receiver.log').open('w+')
-    server = subprocess.Popen([binary, '--config-dir', str(receiver), '--downloads', str(downloads), '--port', str(port), '--json', 'recv', '--bind', '127.0.0.1', '--headless'], stdout=log, stderr=log)
+    server = subprocess.Popen([binary, '--downloads', str(downloads), '--port', str(port), '--json', 'recv', '--yes', '--bind', '127.0.0.1', '--headless'], stdout=log, stderr=log)
     try:
         for _ in range(100):
             time.sleep(.05)
@@ -76,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='clipx-bench-') as td:
                 for compression in ['off', 'auto', 'zstd']:
                     before = resource.getrusage(resource.RUSAGE_CHILDREN) if resource else None
                     start = time.perf_counter()
-                    output = call(sender, '--port', port, 'send', '127.0.0.1', '--path', path, '--transport', transport, '--compression', compression)
+                    output = call(sender, '--port', port, 'send', '--yes', '127.0.0.1', '--path', path, '--transport', transport, '--compression', compression)
                     elapsed = time.perf_counter() - start
                     after = resource.getrusage(resource.RUSAGE_CHILDREN) if resource else None
                     dest = pathlib.Path(next(e['data']['paths'][0] for e in output if e['event'] == 'verified'))

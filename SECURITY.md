@@ -1,56 +1,60 @@
-# Security model
+# Security model — stateless sessions
 
-clipx is an explicit-push tool for mutually trusted personal computers, normally
-inside a tailnet. A trusted peer is authorized to write new files in Downloads
-and replace clipboard contents when the receiver is running. Do not trust devices
-whose users/programs you do not trust. Tailnet membership alone is not sufficient.
+clipx is an explicit-push utility for trusted personal computers. An approved
+session can create files in Downloads and replace clipboard contents. It cannot
+execute received files, overwrite existing output, install services or change
+firewall settings. Run it as your normal user.
 
-TLS 1.3 is enforced by rustls on QUIC and TCP, with `clipx/1` ALPN. Certificate
-fingerprints are BLAKE3 over DER certificate bytes, pinned exactly in the local
-trust store. TLS CertificateVerify signatures are validated using rustls/ring;
-no normal sending path accepts arbitrary server certificates. Certificate pinning
-uses explicit identity rather than WebPKI hostname or CA validation. Self-signed
-certificates are persistent, and fingerprint changes fail closed.
+TLS 1.3 is enforced on QUIC and TCP (ALPN clipx/2, no 0-RTT). Self-signed
+certificate keys are ephemeral, kept only in process memory. TLS CertificateVerify
+signatures are checked with rustls/ring, but no persistent pin, WebPKI hostname
+or CA identity validation is claimed. The provisional TLS connection carries
+only bounded greeting and approval messages before application authorization.
 
-An explicit pair probe can inspect an unpinned certificate while verifying key
-possession. This does not establish identity by itself: verify the displayed
-fingerprint independently. Pair probes transfer no payload and grant no receiver
-trust automatically. The optional receiver pairing mode permits only this limited
-probe for unknown identities. Never enable it as a substitute for verification.
+Both computers display a full 256-bit grouped hexadecimal code derived from
+both certificate fingerprints, a fresh receiver nonce and the connection's TLS
+exporter. Compare the ENTIRE code over an independent trusted channel and type
+y on both ends. A man-in-the-middle terminates different TLS sessions and produces
+different codes. Device names are untrusted, escaped display metadata. Reconnects
+require new approval. Decline, EOF, invalid messages and timeout fail closed.
+Concurrent interactive prompts are rejected; a cancelled input prompt must be
+cleared before another prompt can consume input.
 
-Private identity material lives under the standard per-user config directory;
-Unix directories are 0700 and atomically written identity files are 0600.
-Windows relies on the current user's application-data ACL. Keep your config
-private, especially when overriding its location. No secret is logged. Rotating
-identity requires removing old fingerprints on each peer and pairing again.
+`--yes` deliberately waives LOCAL manual identity verification for this process.
+The other endpoint still independently decides. Both `--yes` means encryption
+without human-authenticated identity: active interception is not excluded.
+`recv --yes` automatically accepts new incoming sessions while running, including
+unwanted senders that can reach its port. Restrict binding and existing firewall/
+tailnet ACLs. The tool does not modify those security settings. No trust decision
+is saved. There is no safety bypass hidden in a config or environment variable.
 
-Incoming paths are validated component by component: no parent/absolute/drive/
-UNC paths, NUL, alternate separators, Windows devices or trailing dot/space
-components. Case-folded duplicate paths and missing parents are rejected.
-Symlink/special-file input is rejected. Receiver staging contains no peer-created
-symlinks. New output is committed with OS-level atomic no-replace operations;
-existing destination files are never deleted. The local same-user/root adversary
-is outside the threat model: it already controls the process, Downloads and keys.
-Do not share clipx's private staging/config directories with untrusted users.
+Sender writes no identity/config/cache/spool. Receiver checkpoints exist only as
+private `.clipx-part-UUID` directories inside Downloads. They contain payloads,
+manifests and hashes, not keys or fingerprints, and are removed after success.
+Interrupted checkpoints may contain sensitive clipboard data; finish the transfer
+or explicitly clean old inactive checkpoints. OS paging/core dumps are outside
+the program's no-application-persistence guarantee.
 
-Chunk lengths, control size, metadata count, worker streams and connections are
-bounded. Zstd decompression is given a bounded output capacity. Clipboard APIs
-and decoded images can require substantial memory; only authorize peers you trust
-to replace your clipboard. File transfer memory is bounded independently of file
-size. TLS does not replace storage verification: every chunk and complete file
-is hashed, and resume journals are checked against bytes before use.
+Incoming paths reject traversal, absolute/drive/UNC paths, NUL, alternate
+separators, reserved Windows names and missing parents. Symlinks/special-file
+input is rejected. Partial files use numeric names. Existing output is never
+deleted: commit uses atomic no-replace operations and collision suffixes.
+Do not share Downloads staging with untrusted local users. A same-user/root
+adversary is out of scope because it already controls the process and files.
 
-There is no watcher or clipboard history. The explicit `send` action may transfer
-whatever you most recently copied, including secrets; inspect it before sending.
-Interrupted clipboard transfers keep private local spool data for resume. Successful
-transfers delete that spool; headless/fallback outputs intentionally remain as files.
+File chunks, zstd output, control frames, manifests, worker streams and connection
+counts are bounded. Every chunk and complete file is hashed. Resume journals are
+revalidated, and the sender checks the receiver's prefix hash before reusing bytes.
+Same metadata is not treated as proof of same content. Clipboard APIs and image
+decoding can use substantial memory; malicious approved senders can exhaust
+memory/disk with valid transfers. Use only trusted peers and OS quotas as needed.
 
-Receipts suppress duplicate output after an ACK is lost. Receipt expiry or removal
-ends this deduplication window. Cross-root commits are not transactional. This
-version does not defend against a malicious authorized peer exhausting disk by
-sending multiple individually valid transfers; use OS quotas and least-privilege
-trust/bind settings where needed.
+No clipboard watcher/history is installed. Explicit send transfers what you
+copied, possibly secrets; inspect before sending. Successful receipts are removed,
+so no long-term exactly-once guarantee exists. A crash at completion may cause a
+suffixed duplicate on a later fresh send; it never justifies overwriting data.
+Multiple selected roots are not a single atomic transaction.
 
-Report vulnerabilities privately through the repository owner's GitHub profile
-contact channel. Do not include credentials or private payloads in public issues.
-This initial implementation has not undergone an independent security audit.
+This new implementation has not had an independent security audit. Report issues
+privately using the repository owner's GitHub profile contact, without posting
+credentials or payloads in public issues.

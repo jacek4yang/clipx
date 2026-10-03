@@ -1,81 +1,60 @@
-# clipx 中文使用指南
+# clipx：复制，发送，核对
 
-用一个 Rust 可执行文件，在 Windows 11、Linux Mint 和无桌面的 Linux 之间
-主动推送剪贴板、文件或目录。适合 Tailscale / Headscale 内网，直接输入 IP
-或主机名，不需要广播发现、云服务、账号或图形界面。
+单个 Rust 二进制，面向 Windows 11 / Linux Mint x64。没有账号、配置文件、持久密钥、信任列表、后台服务或开机启动。
 
-这是首个候选版本，尚不等于已经通过所有实体电脑和网络环境的长期验收。
-完整的能力边界、协议和安全模型见 [README](README.md) 与 [SECURITY](SECURITY.md)。
+## 安装
 
-## 第一次使用：双方核对指纹
+到 [Releases](https://github.com/jacek4yang/clipx/releases) 下载对应系统的包，核对 SHA256SUMS.txt，解压后只保留二进制也能运行。
+- Linux x64 优先 musl 静态版，将 clipx 放入 ~/.local/bin，并确保该目录在 PATH 中。
+- Windows x64 将 clipx.exe 放入自己选定的 PATH 目录。无需额外 MSVC 运行库；未签名，系统可能提示正常安全检查。
+- 不同系统/CPU 需要对应二进制，不存在真正适用于所有电脑的同一个文件。
 
-每台电脑执行：
+## 最简单的用法
 
+接收电脑：
 ```sh
-clipx fingerprint
+clipx recv
 ```
-
-通过可信渠道核对两台电脑显示的指纹。接收电脑信任发送电脑：
-
+发送电脑先复制文件、图片或文字，然后：
 ```sh
-clipx peer trust 发送电脑的64位指纹
-clipx recv --bind 100.64.0.6
+clipx send 对方IP
 ```
+两边显示同一串一次性指纹，人工核对整行相同，再在两端分别输入 y。每次连接，包括断线重连，都生成新的指纹，不记住任何设备。默认回车或输入 n 拒绝。
 
-发送电脑信任接收电脑，并设一个好记的别名：
-
+如果信任当前网络，可以分别省略某一端的确认：
 ```sh
-clipx peer trust 接收电脑的64位指纹 --host 100.64.0.6
-clipx peer add lab 100.64.0.6
-clipx send lab
+clipx recv --yes
+clipx send --yes 对方IP
 ```
+--yes 只影响当前这一端、当前进程，不会替另一端确认，也不保存设置。
+recv --yes 会在运行期间自动接受传入请求，只建议在可信网络、受控的 Tailscale ACL 下使用。两端都 --yes 仍然加密，但没有人工身份核验，不能防止主动冒充/中间人。
 
-把例子里的 IP 和指纹替换成自己的。不要直接复制占位文字。
-之后通常只需让接收端一直运行 `clipx recv`，发送端复制内容后执行
-`clipx send lab`。双向发送时，在另一方向也配好信任。
-更改信任后重启接收进程。身份更换会报错，不会悄悄接受新证书。
-
-## 常用命令
+## 其他常用操作
 
 ```sh
-clipx send lab --path project
-clipx send lab --path report.pdf --path photo.png
-clipx send lab --text "你好"
+clipx recv --bind 你的TailscaleIP
 clipx recv --headless
-clipx send lab --transport tcp
-clipx send lab --compression off
-clipx send lab --resume 之前打印的传输UUID
+clipx send 对方IP --path 文件或目录
+clipx send 对方IP --text "你好"
+clipx send 对方IP --transport tcp
 clipx cleanup
-clipx doctor
 ```
 
-- 自动读取优先级：复制的文件/目录 → 图片 → 文字
-- 文件/目录进入系统的下载目录，不覆盖同名项，会加 `(1)`、`(2)` 后缀
-- 文字/图片进入接收端剪贴板；无桌面或写剪贴板失败时保存为下载目录中的文件
-- 普通文件分块处理，目录不需要预先制作整份压缩包
-- QUIC 优先，建立认证会话慢时自动尝试 TCP/TLS；中断后按已验证的数据续传
-- 默认 TCP 和 UDP 都用 45817，防火墙和 tailnet ACL 需要允许它们
-- 推荐绑定 Tailscale IP；默认 IPv4 通配地址也会暴露在局域网上，但仍需身份认证
-- Linux X11 要保持接收进程运行以持有剪贴板；Wayland 依赖桌面支持 data-control
-- 不默认监控剪贴板，也不会自动传播每一次复制，避免悄悄同步密码等内容
+默认端口 UDP/TCP 45817，程序不自动更改防火墙。--stdin 支持管道文字；默认从控制终端读取确认，无终端时应明确选择 --yes。--json 输出到 stdout，确认/警告仍在 stderr。
 
-文件大小用 64 位表示。剪贴板图片/文字仍受系统与内存限制，不承诺无限容量。
-断线期间会保留续传数据；默认 `cleanup` 清理超过 7 天且未被活动进程锁定的状态。
+## 保持纯净
 
-## 构建与发布
+发送端不写配置、密钥、缓存或剪贴板临时文件。接收端只在下载目录创建最终文件，以及传输期间必要的 .clipx-part-UUID 断点目录；成功确认后删除断点目录。它不含密钥、指纹或信任列表。
+中断后保持源文件不变，重复原命令即可匹配断点；两端进程重启也能续传，仍重新核对指纹。接收端校验已有块，双方比较前缀哈希，不一致时从该文件开头重新发送。
+clipx cleanup 清理超过七天且不活跃的断点；--days 可调整。没有定时清理或常驻安装。
 
-项目固定 Rust 工具链和 Cargo.lock。CI 在 Windows 和 Linux 上执行格式检查、
-Clippy、单元/网络测试、真实剪贴板测试、杀掉接收进程后的自动恢复测试，
-通过后才允许发布打包文件和 SHA-256 校验和。
+为了不保留历史，成功完成后的记录也删除。极端崩溃若丢失完成确认，重新发送可能得到带序号的副本，但绝不覆盖旧文件。已提示 Verified 后若仅清理确认失败，不需要为该警告重发。
 
-```sh
-cargo build --locked --release
-```
+## 能力与边界
 
-Linux 优先下载 musl 静态构建，避免 glibc 版本及动态库依赖；另有 GNU 兼容构建。
-Windows 使用静态 MSVC 运行库，并检查不依赖额外 VC 运行库 DLL。
-只复制对应平台的一个可执行文件即可，文档不是运行依赖，许可证也已嵌入程序。
-`clipx licenses` 可查看。设备身份和信任记录会自动保存到当前用户的配置目录，
-不需要提前放置配套文件，也不会把不同电脑的私钥打包成同一份。
+QUIC 优先、TCP/TLS 回退，TLS 1.3。一次性指纹绑定双方临时证书及当前 TLS 会话，RC2 与 RC1 协议不兼容，请两端一起升级。
+文件/目录按 1 MiB 块流式传输，支持 zstd、块及完整文件 BLAKE3 校验、断点续传。目录不先生成完整压缩包。
+剪贴板文字/图片需要内存；超大数据建议作为文件发送。Linux X11 支持剪贴板所有权，接收进程需保持运行；Wayland 依赖合成器 data-control 协议，不能保证任意 GNOME Wayland。无剪贴板时在 Downloads 保存文字/PNG。
+不支持符号链接、特殊文件或无效 Unicode 文件名；可移植文件名会做必要映射。不会导入远端权限、执行位、ACL 或执行收到的文件。
 
-发布包中的程序无需 Node/Python/Java。仓库里的 Python 文件仅供开发测试和打包。
+这是候选版。三平台构建及自动化测试覆盖不等于所有真实硬件均验证，也不承诺超过 LocalSend。详细边界见 [英文说明](README.md)、[验证记录](docs/VALIDATION.md) 和 [安全说明](SECURITY.md)。

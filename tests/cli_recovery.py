@@ -20,7 +20,7 @@ def port():
         return s.getsockname()[1]
 
 def run(config, *args):
-    return subprocess.run([binary, '--config-dir', str(config), '--json', *map(str, args)], text=True, capture_output=True, check=True)
+    return subprocess.run([binary, '--json', *map(str, args)], text=True, capture_output=True, check=True)
 
 def digest(path):
     h = hashlib.sha256()
@@ -32,10 +32,6 @@ def digest(path):
 with tempfile.TemporaryDirectory(prefix='clipx-recovery-') as tmp:
     root = pathlib.Path(tmp)
     sc, rc, dl = [root / p for p in ['sender', 'receiver', 'downloads']]
-    sfp = json.loads(run(sc, 'fingerprint').stdout)['data']['blake3_cert']
-    rfp = json.loads(run(rc, 'fingerprint').stdout)['data']['blake3_cert']
-    run(sc, 'peer', 'trust', rfp, '--host', '127.0.0.1')
-    run(rc, 'peer', 'trust', sfp)
     backend, frontend = port(), port()
     source = root / 'large.bin'
     with source.open('wb') as f:
@@ -43,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix='clipx-recovery-') as tmp:
             f.write(bytes([i]) * 1048576)
     log = (root / 'receiver.log').open('w+')
     def receiver():
-        child = subprocess.Popen([binary, '--config-dir', str(rc), '--downloads', str(dl), '--port', str(backend), 'recv', '--bind', '127.0.0.1', '--headless', '--transport', 'tcp'], stdout=log, stderr=log)
+        child = subprocess.Popen([binary, '--downloads', str(dl), '--port', str(backend), 'recv', '--yes', '--bind', '127.0.0.1', '--headless', '--transport', 'tcp'], stdout=log, stderr=log)
         for _ in range(100):
             try:
                 with socket.create_connection(('127.0.0.1', backend), .05):
@@ -95,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix='clipx-recovery-') as tmp:
                 errors.append(str(e))
     worker = threading.Thread(target=proxy, daemon=True)
     worker.start()
-    sender = subprocess.Popen([binary, '--config-dir', str(sc), '--json', '--port', str(frontend), 'send', '127.0.0.1', '--path', str(source), '--transport', 'tcp', '--compression', 'off'], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    sender = subprocess.Popen([binary, '--json', '--port', str(frontend), 'send', '--yes', '127.0.0.1', '--path', str(source), '--transport', 'tcp', '--compression', 'off'], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         assert cut.wait(30), 'proxy did not interrupt transfer'
         server.kill()

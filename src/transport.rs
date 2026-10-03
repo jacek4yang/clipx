@@ -1,5 +1,5 @@
 use crate::{
-    identity::{Identity, Trust},
+    identity::Identity,
     protocol::{self, Msg},
 };
 use anyhow::{Context, Result, bail};
@@ -42,6 +42,12 @@ pub struct Session {
     pub endpoint: Option<quinn::Endpoint>,
     pub fingerprint: String,
     pub transport: &'static str,
+    pub peer_device: String,
+    pub peer_name: String,
+    pub pairing_confirmation: bool,
+    pub session_nonce: String,
+    pub authorized: bool,
+    pub binding: [u8; 32],
 }
 impl Session {
     pub async fn data(&mut self) -> Result<Wire> {
@@ -76,7 +82,7 @@ pub fn tuning() -> Arc<quinn::TransportConfig> {
 async fn ready(mut s: Session, id: &Identity, pair: bool) -> Result<Session> {
     s.ctrl
         .send(&Msg::Hello {
-            version: 1,
+            version: 2,
             device: id.id.clone(),
             name: id.name.clone(),
             pair,
@@ -84,24 +90,34 @@ async fn ready(mut s: Session, id: &Identity, pair: bool) -> Result<Session> {
         })
         .await?;
     match s.ctrl.recv().await? {
-        Msg::Ready { version, chunk, .. } => protocol::check_version(version, chunk)?,
+        Msg::Ready {
+            version,
+            chunk,
+            device,
+            name,
+            pairing_confirmation,
+            session_nonce,
+        } => {
+            protocol::check_version(version, chunk)?;
+            if device.len() > 128
+                || name.len() > 128
+                || uuid::Uuid::parse_str(&session_nonce).is_err()
+            {
+                bail!("invalid session greeting");
+            }
+            s.peer_device = device;
+            s.peer_name = name;
+            s.pairing_confirmation = pairing_confirmation;
+            s.session_nonce = session_nonce;
+        }
         _ => bail!("expected SessionReady"),
-    }
-    if pair {
-        s.ctrl.send(&Msg::Ack).await?;
     }
     Ok(s)
 }
-async fn one(
-    addr: SocketAddr,
-    mode: &str,
-    id: &Identity,
-    expected: Option<String>,
-    pair: bool,
-) -> Result<Session> {
+async fn one(addr: SocketAddr, mode: &str, id: &Identity, pair: bool) -> Result<Session> {
     let observed = Arc::new(Mutex::new(None));
-    let cfg = id.client_config(expected, observed.clone())?;
-    let (ctrl, conn, endpoint, transport) = if mode == "quic" {
+    let cfg = id.client_config(observed.clone())?;
+    let (ctrl, conn, endpoint, transport, binding) = if mode == "quic" {
         let bind: SocketAddr = if addr.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -114,6 +130,9 @@ async fn one(
         qc.transport_config(tuning());
         endpoint.set_default_client_config(qc);
         let conn = endpoint.connect(addr, "clipx.local")?.await?;
+        let mut binding = [0; 32];
+        conn.export_keying_material(&mut binding, b"EXPORTER-clipx-session", b"")
+            .map_err(|_| anyhow::anyhow!("TLS exporter failed"))?;
         let (w, r) = conn.open_bi().await?;
         (
             Wire {
@@ -123,6 +142,7 @@ async fn one(
             Some(conn),
             Some(endpoint),
             "quic",
+            binding,
         )
     } else {
         let socket = tokio::net::TcpStream::connect(addr).await?;
@@ -138,6 +158,10 @@ async fn one(
         {
             bail!("ALPN mismatch");
         }
+        let binding =
+            tls.get_ref()
+                .1
+                .export_keying_material([0u8; 32], b"EXPORTER-clipx-session", None)?;
         let (r, w) = tokio::io::split(tls);
         (
             Wire {
@@ -147,6 +171,7 @@ async fn one(
             None,
             None,
             "tcp",
+            binding,
         )
     };
     let fp = observed
@@ -161,20 +186,19 @@ async fn one(
             endpoint,
             fingerprint: fp,
             transport,
+            peer_device: String::new(),
+            peer_name: String::new(),
+            pairing_confirmation: false,
+            session_nonce: String::new(),
+            authorized: false,
+            binding,
         },
         id,
         pair,
     )
     .await
 }
-async fn family(
-    host: &str,
-    port: u16,
-    mode: &str,
-    id: &Identity,
-    expected: Option<String>,
-    pair: bool,
-) -> Result<Session> {
+async fn family(host: &str, port: u16, mode: &str, id: &Identity, pair: bool) -> Result<Session> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let addresses: Vec<_> = tokio::net::lookup_host((host, port))
         .await?
@@ -182,12 +206,7 @@ async fn family(
         .collect();
     let mut last = anyhow::anyhow!("hostname has no addresses");
     for addr in addresses {
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            one(addr, mode, id, expected.clone(), pair),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_secs(5), one(addr, mode, id, pair)).await {
             Ok(Ok(s)) => return Ok(s),
             Ok(Err(e)) => last = e,
             Err(e) => last = e.into(),
@@ -200,19 +219,16 @@ pub async fn connect(
     port: u16,
     mode: &str,
     id: &Identity,
-    expected: Option<String>,
+
     pair: bool,
 ) -> Result<Session> {
-    if !pair && expected.is_none() {
-        bail!("unknown peer: run clipx pair HOST first, or preload a fingerprint with peer trust");
-    }
     if mode != "auto" {
-        return family(host, port, mode, id, expected, pair).await;
+        return family(host, port, mode, id, pair).await;
     }
-    let q = family(host, port, "quic", id, expected.clone(), pair);
+    let q = family(host, port, "quic", id, pair);
     let t = async {
         tokio::time::sleep(Duration::from_millis(350)).await;
-        family(host, port, "tcp", id, expected, pair).await
+        family(host, port, "tcp", id, pair).await
     };
     tokio::pin!(q);
     tokio::pin!(t);
@@ -222,13 +238,8 @@ pub async fn connect(
     }
     // Dropping the losing future closes its session before caller can send any payload.
 }
-pub fn server_endpoint(
-    addr: SocketAddr,
-    id: &Identity,
-    trust: &Trust,
-    pairing: bool,
-) -> Result<quinn::Endpoint> {
-    let tls = id.server_config(trust.fingerprints.clone(), pairing)?;
+pub fn server_endpoint(addr: SocketAddr, id: &Identity) -> Result<quinn::Endpoint> {
+    let tls = id.server_config()?;
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     config.transport = tuning();
@@ -242,6 +253,9 @@ pub async fn accept_quic(incoming: quinn::Incoming) -> Result<Session> {
         .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
         .map_err(|_| anyhow::anyhow!("bad client identity"))?;
     let fp = crate::identity::fingerprint(certs.first().context("missing certificate")?.as_ref());
+    let mut binding = [0; 32];
+    c.export_keying_material(&mut binding, b"EXPORTER-clipx-session", b"")
+        .map_err(|_| anyhow::anyhow!("TLS exporter failed"))?;
     let (w, r) = c.accept_bi().await?;
     Ok(Session {
         ctrl: Wire {
@@ -252,6 +266,12 @@ pub async fn accept_quic(incoming: quinn::Incoming) -> Result<Session> {
         endpoint: None,
         fingerprint: fp,
         transport: "quic",
+        peer_device: String::new(),
+        peer_name: String::new(),
+        pairing_confirmation: false,
+        session_nonce: String::new(),
+        authorized: false,
+        binding,
     })
 }
 pub async fn accept_tcp(
@@ -274,6 +294,10 @@ pub async fn accept_tcp(
     {
         bail!("ALPN mismatch");
     }
+    let binding =
+        tls.get_ref()
+            .1
+            .export_keying_material([0u8; 32], b"EXPORTER-clipx-session", None)?;
     let (r, w) = tokio::io::split(tls);
     Ok(Session {
         ctrl: Wire {
@@ -284,6 +308,12 @@ pub async fn accept_tcp(
         endpoint: None,
         fingerprint: fp,
         transport: "tcp",
+        peer_device: String::new(),
+        peer_name: String::new(),
+        pairing_confirmation: false,
+        session_nonce: String::new(),
+        authorized: false,
+        binding,
     })
 }
 

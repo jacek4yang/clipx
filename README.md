@@ -2,101 +2,96 @@
 
 [中文快速上手](README.zh-CN.md)
 
-Explicit, encrypted, resumable clipboard and file transfers between your own
-Windows 11 and Linux Mint computers. One Rust executable; no cloud service,
-account, multicast discovery, HTTP server, GUI or background clipboard watcher.
+One Rust executable for encrypted clipboard, file and directory transfers between
+Windows 11 and Linux Mint computers. No account, config, saved identity, trust
+store, daemon, autostart, watcher, discovery or cloud service.
 
-**Initial release candidate.** This is a new implementation, not a claim of
-proven production reliability or benchmark superiority over LocalSend. Test it
-on your own machines before depending on it for irreplaceable data.
+## Install once
 
-## Quick start
+Download from [Releases](https://github.com/jacek4yang/clipx/releases), check the
+archive against SHA256SUMS.txt, extract the executable and put it on PATH.
+Linux x64: prefer **x86_64-unknown-linux-musl** (static, no shared-library runtime).
+Place `clipx` in `~/.local/bin` and ensure that directory is on your PATH.
+Windows x64: put `clipx.exe` in a PATH directory of your choice. Static MSVC CRT;
+only OS DLLs are imported. Windows builds are unsigned and may require normal
+SmartScreen review. Documents are optional; `clipx licenses` embeds all notices.
+A binary is specific to its OS/architecture, not universal across every computer.
 
-Download the appropriate executable archive from GitHub Releases, verify its
-SHA-256 against `SHA256SUMS.txt`, extract, and put `clipx` / `clipx.exe` on PATH.
-For Linux, prefer **x86_64-unknown-linux-musl**: a statically linked executable
-with no ELF interpreter or shared-library dependency. A GNU/Linux alternative is
-also provided, built on Ubuntu 22.04 for a conservative glibc baseline.
-Windows builds use the static MSVC CRT and are checked for system-only DLL imports.
-Copying the executable alone is sufficient; included documents are optional.
-Windows executables are currently unsigned, so SmartScreen or local security
-policy may require user review. Verify checksums; no security bypass is installed.
-`clipx licenses` displays third-party notices embedded in the executable.
+## Two commands
 
-On each device, print its identity:
+Receiver:
+```sh
+clipx recv
+```
+Sender (replace IP with receiver address):
+```sh
+clipx send IP
+```
+Both terminals display the SAME one-time session fingerprint. Compare the entire
+line over an independent trusted channel, then type `y` on each computer.
+Every new connection, including a retry, has a fresh code and requires approval.
+No device is remembered. Empty input, EOF, `n`, mismatch or timeout means stop.
+A displayed name is unverified metadata, not an identity guarantee.
+
+### Optional unattended approval
 
 ```sh
-clipx fingerprint
+clipx recv --yes
+clipx send --yes IP
 ```
+Each flag skips ONLY local confirmation, only for this process. One side using
+`--yes` does not override the other side. The fingerprint is still printed.
+`recv --yes` accepts incoming sessions for as long as it runs, so use only on a
+trusted network with appropriately restricted binding/firewall/tailnet ACLs.
+With both sides using `--yes`, TLS still encrypts traffic, but no human verifies
+peer identity; active interception and unwanted senders are not excluded.
+Nothing about `--yes` is saved. There is no remembered trust setting.
 
-Compare fingerprints through an independent trusted channel. On the receiver,
-trust the sender's 64-hex-character fingerprint (not the device name):
+## Useful explicit inputs
 
 ```sh
-clipx peer trust SENDER_FINGERPRINT
-clipx recv --bind 100.64.0.6
+clipx recv --bind 100.64.0.6         # restrict to your actual tailnet address
+clipx recv --headless              # save clipboard payloads as Downloads files
+clipx send IP --path report.pdf
+clipx send IP --path folder --path image.png
+clipx send IP --text 'hello'
+printf 'hello' | clipx send --yes IP --stdin
+clipx send IP --transport tcp
+clipx send IP --compression off
+clipx cleanup                      # inactive checkpoints older than 7 days
 ```
 
-On the sender, pin the receiver's independently verified fingerprint:
+Without `--yes`, `--stdin` reads confirmation from the controlling terminal,
+not from payload input. If no terminal exists, it fails safely. Normal prompts
+read stdin. Use `--yes` deliberately for scripts. There is no remote shell or
+automatic execution of received files.
+Global `--downloads`, `--port`, `--transport`, `--json`, `--quiet`, `--verbose`
+may appear after subcommands. Default port is UDP/TCP 45817. JSON data goes to
+stdout; fingerprints, prompts and warnings go to stderr even with `--quiet`.
 
-```sh
-clipx peer trust RECEIVER_FINGERPRINT --host 100.64.0.6
-clipx peer add lab 100.64.0.6
-clipx send lab
-```
+## Disk footprint and recovery
 
-Both devices are symmetric: repeat trust setup in the other direction to send
-back. `recv` reads its TLS client trust list at startup; restart it after changing
-trust. The host mapping uses the actual IP/hostname, not an alias.
+The sender creates no identity/config/cache/spool files. Ephemeral keys and
+clipboard bytes exist only in memory. The receiver creates Downloads if needed,
+final output, and a private `.clipx-part-UUID` checkpoint there while transferring.
+Checkpoints contain payload bytes, manifests and integrity journals, never keys,
+fingerprints or trust records. Successful acknowledged delivery removes them.
+Interrupted transfers retain them so repeating the SAME send command with unchanged
+source data can resume, even after either process restarts with new keys. The
+receiver revalidates stored chunks; both ends compare the prefix hash before using
+it. A different source prefix restarts that file rather than splicing content.
 
-### Interactive discovery alternative
+Transient failures retry up to three times by default (`--retries 0..12`), with
+backoff. Each new session requires fresh confirmation unless that side uses
+`--yes`. Auto retries prefer TCP. Ctrl+C stops the process; partial output remains
+hidden and resumable. `cleanup --days N` removes only inactive recognized
+checkpoints. No startup service or automatic cleanup task is installed.
 
-The receiver can temporarily allow **pair-only** probes:
-
-```sh
-clipx recv --pairing --bind 100.64.0.6
-# On sender:
-clipx pair 100.64.0.6
-# Or noninteractive with an independently verified pin:
-clipx pair 100.64.0.6 --fingerprint RECEIVER_FINGERPRINT
-```
-
-`pair` prints the receiver fingerprint and requires an exact `yes`. The receiver
-prints the probing sender fingerprint; verify it on the sender and run
-`peer trust SENDER_FINGERPRINT` locally. Restart `recv` without `--pairing`.
-Pair probes cannot send files or clipboard contents, and do not automatically
-trust the connecting sender. A changed known fingerprint fails closed; deliberate
-identity rotation requires `clipx peer forget OLD_FINGERPRINT` and re-pairing.
-
-## Everyday use
-
-```sh
-clipx recv                           # default IPv4 wildcard, UDP and TCP 45817
-clipx recv --bind 100.64.0.6          # recommended tailnet-only binding
-clipx recv --bind ::                 # IPv6; dual-stack behavior depends on OS
-clipx recv --headless
-clipx send lab                       # copied files, then image, then text
-clipx send lab --path report.pdf
-clipx send lab --path project --path photo.png
-clipx send lab --text 'hello'
-printf 'hello' | clipx send lab --stdin
-clipx send lab --transport tcp
-clipx send lab --compression off
-clipx peer list
-clipx peer remove lab
-clipx doctor
-clipx cleanup                        # remove inactive state older than 7 days
-```
-
-Global options may appear after subcommands. `--config-dir` (or
-`CLIPX_CONFIG_DIR`) and `--downloads` (or `CLIPX_DOWNLOADS`) support isolated
-instances and tests. `--port` changes both UDP and TCP port. `--json` emits
-machine-readable stdout events; diagnostics use stderr. `--quiet` silences normal
-stdout; `--verbose` includes retry error details.
-
-There is no daemon installer, autostart, firewall rule modification, automatic
-clipboard synchronization or password-history collection. Run the receiver in
-your preferred terminal/service manager. No root/admin privileges are required.
+A finalization receipt is kept only inside an unfinished checkpoint, and deleted
+after successful acknowledgement. There is deliberately no long-term delivery
+history. If a crash loses completion acknowledgement, a later fresh send can
+produce a suffixed duplicate, never overwrite existing output. After a verified
+completion followed by cleanup warning, do not resend solely for that warning.
 
 ## Clipboard and files
 
@@ -105,7 +100,7 @@ your preferred terminal/service manager. No root/admin privileges are required.
   owner in the receiving process. Keep `recv` running for selection ownership.
 - Wayland: `clipboard-rs` with `wl-clipboard-rs`; requires a compositor supporting
   ext-data-control or wlr-data-control. This does **not** promise arbitrary GNOME
-  Wayland support. `doctor` reports availability; use explicit inputs if absent.
+  Wayland support. Use explicit file/text inputs if unavailable.
 - Headless or unavailable receiving clipboard: text becomes `clipboard.txt`,
   image becomes `clipboard.png` in Downloads. Existing files receive suffixes.
 - Clipboard text/images necessarily materialize in memory, including image
@@ -120,56 +115,24 @@ your preferred terminal/service manager. No root/admin privileges are required.
   suffixes. Mapping does not change file contents.
 - Downloads uses the platform directory API, then `$HOME/Downloads` fallback.
 
-## Transports, compression and recovery
+## Transport and integrity
 
-QUIC/UDP is preferred. Auto mode starts TCP/TLS after 350 ms if QUIC has not
-completed an authenticated application session. Only the winner may offer a
-transfer. Both use TLS **1.3 only**, client certificates and pinned certificate
-fingerprints, with ALPN `clipx/1`. No TLS 0-RTT or QUIC datagrams are used.
-Quinn's conservative MTU/PMTU and CUBIC defaults remain intact.
+QUIC is preferred; TCP/TLS starts after 350 ms if needed. Only the selected
+connection prompts or transfers. TLS 1.3 only, ALPN `clipx/2`, no 0-RTT. Both
+ends prove possession of ephemeral certificate keys. The displayed code binds
+both certificate fingerprints, receiver nonce and this connection's TLS exporter.
+It is not merely a static certificate fingerprint. Version 2 is intentionally
+incompatible with RC1; upgrade both ends.
 
-QUIC uses one control stream and up to four reusable worker streams; TCP uses
-one framed sequential stream. Each file is streamed in independent 1 MiB chunks.
-Each chunk and complete file have real BLAKE3 hashes. Up to eight chunks per
-worker may be in flight before the sender waits for their verification ACKs. Zstd auto mode tests a
-small sample; already compressed/random content typically stays uncompressed.
-The receiver bounds both encoded and decoded chunk sizes.
+One control stream plus up to four QUIC workers; TCP uses one sequential stream.
+Files use 1 MiB chunks, up to eight in-flight chunks per worker, bounded zstd
+compression/decompression and BLAKE3 chunk/full-file checks. Normal transfers
+hash while streaming. Resume re-reads verified prefixes without retransmitting
+matching bytes. Quinn CUBIC/PMTU defaults are retained.
 
-On a transient disconnection, the sender retries with bounded exponential
-backoff (five retries by default). Auto retries favor TCP after failure. Ctrl+C
-preserves resumable state. The command prints its transfer ID:
-
-```sh
-clipx send lab --resume TRANSFER_UUID
-```
-
-Keep the original files unchanged. Resume state is bound to the sender
-certificate and exact manifest. The receiver rechecks every journaled chunk
-against stored bytes and resumes at the verified prefix of each file. Corrupt
-or torn journal tails are truncated; they are never blindly trusted. Sender and
-receiver re-hash their existing prefixes on resume to reconstruct a real
-whole-file BLAKE3 state. This adds disk reads on resume, but not network retransmit
-of verified prefixes. Normal fresh transfers hash while streaming.
-
-Partial data lives in Downloads/.clipx-state/partials and outgoing plans in the
-private configuration directory. Clipboard payloads are temporarily spooled for
-resumability, then removed from disk after acknowledged success. Interrupted
-clipboard spools contain potentially sensitive data: complete or remove them
-when no longer needed. `cleanup` removes abandoned incoming partials/receipts and outgoing plans/spools
-older than the retention threshold, excluding active locked transfers.
-
-## Commit and metadata semantics
-
-A file/tree becomes visible only after all entries pass final verification.
-Linux uses `renameat2(RENAME_NOREPLACE)`; Windows uses `MoveFileExW` without
-replacement. If a destination races with commit, a new numeric suffix is tried.
-There is no delete-and-overwrite fallback. Unsupported filesystems fail safely.
-Staging is on the destination filesystem. Multiple selected top-level roots
-commit one root at a time, **not** as one cross-root atomic transaction.
-A durable finalization journal recovers interrupted commits; completion receipts
-make repeat delivery of the same ID idempotent until receipt cleanup (7 days by
-default). If you delete final output, a receipt can still report the earlier
-successful delivery; start a new transfer to deliver again.
+Verified trees commit via Linux renameat2(RENAME_NOREPLACE) or Windows MoveFileExW
+without replacement. Names get suffixes on collision. Multiple roots commit
+one at a time; no cross-root atomicity or filesystem-backup promise.
 
 Contents and tree shape are preserved; modification times are applied where
 supported. Ownership is the receiving user's. Windows inherits local ACLs. Unix
@@ -178,45 +141,28 @@ NTFS ADS, executable mode or setuid/setgid metadata is imported. This is a data
 transfer utility, not a filesystem backup program. Source files must not change
 during transfer; size/mtime and final hashes detect common concurrent edits.
 
-## Limits and troubleshooting
+## Limits and verification
 
-Limits: 1 MiB chunks, 64 KiB control frames, 100,000 entries, 16 MiB estimated
-manifest metadata, 64 components, 4096-byte relative paths, four QUIC workers,
-eight active connections. There is no 32-bit file-size cap. Clipboard memory is
-separate from the bounded file-transfer pipeline. Free-space checks are
-conservative estimates, not guarantees; ENOSPC is a failure, never success.
-
-Allow **both UDP and TCP 45817** in your existing firewall/tailnet ACLs. No Tailscale
-API is needed. MagicDNS names, ordinary DNS, IPv4 and IPv6 are supported. For
-restricted exposure bind the actual tailnet address; default wildcard binding
-can accept connections on the LAN too (authentication remains mandatory).
-
-If pairing fails, check fingerprints in both directions, restart the receiver,
-then check port/ACL and `clipx doctor`. If X11 lacks DISPLAY/Xauthority or Wayland
-lacks a data-control protocol, use `--path`, `--text`, `--stdin`, or `--headless`.
-The program does not bypass desktop permission or clipboard restrictions.
-
-## Build and verification
+64 KiB control frames; 100,000 entries; 16 MiB manifest metadata; 64 path
+components; 4096-byte relative paths; four QUIC workers; eight active connections.
+File sizes use u64. Clipboard text/image decoding is necessarily memory-resident;
+large data should be sent as files. ENOSPC and unsupported filesystem operations
+fail rather than reporting success. Default receiver binds IPv4 wildcard: restrict
+`--bind` if other networks should not reach it. `--bind ::` enables IPv6; dual-stack
+behavior is OS-dependent. No firewall/network configuration is modified.
 
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 cargo build --locked --release
-# Disposable X11 environment (Linux):
-xvfb-run -a cargo test --test clipboard_graphical -- --ignored --nocapture
-# Windows interactive desktop:
-cargo test --test clipboard_graphical -- --ignored --nocapture
+python tests/cli_confirmation.py target/release/clipx
+python tests/cli_recovery.py target/release/clipx
 ```
 
-Rust 1.99.0 is pinned in rust-toolchain.toml; Cargo.lock is committed. Linux
-clipboard support uses Rust X11/Wayland clients; no OpenSSL or language runtime
-is needed. Wayland uses a Rust-native protocol client; a running compositor supporting
-its data-control protocol is still necessary. Tests distinguish headless payload delivery from actual clipboard
-round-trips. CI builds and tests Windows, Linux GNU and static Linux musl, then publishes archives and
-SHA-256 checksums only after both succeed. Initial releases are marked pre-release.
-
-See [SECURITY.md](SECURITY.md), [protocol](docs/PROTOCOL.md) and
-[validation](docs/VALIDATION.md). The repository-local helper
-`sh tools/setup-git-identity.sh` configures the maintainer's Git identity without
-changing global Git configuration or any other computer.
+Rust 1.99.0 is pinned. CI tests Windows x64, GNU/Linux x64 and static musl x64,
+including real clipboard round-trips and process-level transfer tests, before
+release. This is a release candidate, not an independent security audit or a
+promise to outperform LocalSend. Wayland/compositor and physical desktop coverage
+are documented in [validation](docs/VALIDATION.md).
+See [security](SECURITY.md) and [protocol](docs/PROTOCOL.md).
