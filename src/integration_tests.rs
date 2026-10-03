@@ -24,9 +24,16 @@ impl Fixture {
         fs::create_dir(&input)?;
         let dl = root.path().join("downloads");
         fs::create_dir(&dl)?;
-        let port = std::net::TcpListener::bind("127.0.0.1:0")?
-            .local_addr()?
-            .port();
+        // TCP availability does not imply UDP availability on Windows.
+        // Probe both protocols, keeping both sockets alive until a pair succeeds.
+        let port = (0..100)
+            .find_map(|_| {
+                let udp = std::net::UdpSocket::bind("127.0.0.1:0").ok()?;
+                let port = udp.local_addr().ok()?.port();
+                let _tcp = std::net::TcpListener::bind(("127.0.0.1", port)).ok()?;
+                Some(port)
+            })
+            .ok_or_else(|| anyhow::anyhow!("no available UDP/TCP test port"))?;
         let options = Arc::new(Receiver {
             downloads: dl,
             headless: true,
