@@ -78,15 +78,17 @@ impl Approval {
         if let Some(answer) = self.test_answer {
             return Ok(answer);
         }
-        crate::prompt::banner(code, peer);
         if self.automatic {
+            eprintln!("Pairing fingerprint: {code}\nPeer: {peer:?}");
             eprintln!("WARNING: --yes skips local verification for this process.");
             return Ok(true);
         }
         if self.knows(fingerprint) {
+            eprintln!("Pairing fingerprint: {code}\nPeer: {peer:?}");
             eprintln!("✓ 已在当前进程核对 / Verified earlier in this process; waiting for peer.");
             return Ok(true);
         }
+        crate::prompt::banner(code, peer);
         if !self.interactive {
             bail!("confirmation input is unavailable; run send/recv in terminals");
         }
