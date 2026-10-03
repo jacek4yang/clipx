@@ -16,7 +16,7 @@ class Child:
         self.output = ''; self.position = 0; self.status = None
         if os.name == 'nt':
             from winpty import PtyProcess
-            self.p = PtyProcess.spawn(subprocess.list2cmdline([binary, *args]), env=env, dimensions=(30, 100))
+            self.p = PtyProcess.spawn([binary, *args], env=env, dimensions=(30, 100))
         else:
             import pty, fcntl, struct, termios
             self.pid, self.fd = pty.fork()
@@ -98,6 +98,7 @@ with tempfile.TemporaryDirectory(prefix='clipx-pty-') as tmp:
                 sender.finish();assert 'verified' in sender.clean(),sender.clean()
                 assert not list(dl.glob('.clipx-*'));assert set(home.iterdir())=={dl}
                 cases+=1
+                print(f'PASS terminal case {cases}: {mode}, sender_yes={sy}, receiver_yes={ry}',flush=True)
             finally:
                 if sender: sender.close()
                 server.close()
@@ -126,6 +127,7 @@ with tempfile.TemporaryDirectory(prefix='clipx-pty-') as tmp:
         # Ctrl+C at a pending prompt exits receiver and restores terminal state.
         sender=Child(['--json','--port',port,'send','--yes','127.0.0.1','--text','cancel','--retries','0'],env)
         try:
+            server.code() # Advance past the previous completed prompt's rendered selection.
             server.wait('Fingerprints match?');server.write('\x03');server.finish();sender.finish(False)
         finally:sender.close()
     finally:server.close()
