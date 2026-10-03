@@ -1,6 +1,6 @@
 [package]
 name = "clipx"
-version = "0.1.0-rc.2"
+version = "0.1.0-rc.3"
 edition = "2024"
 rust-version = "1.88"
 description = "Explicit, encrypted, resumable clipboard and file transfers over your tailnet"
@@ -29,6 +29,9 @@ fs2 = "0.4"
 walkdir = "2"
 hex = "0.4"
 url = "2"
+dialoguer = { version = "0.12", default-features = false }
+console = "0.16"
+crossterm = { version = "0.29", default-features = false, features = ["events", "windows", "use-dev-tty", "bracketed-paste"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs"] }
@@ -47,3 +50,5 @@ codegen-units = 1
 
 [patch.crates-io]
 clipboard-rs = { path = "vendor/clipboard-rs" }
+
+dialoguer = { path = "vendor/dialoguer" }

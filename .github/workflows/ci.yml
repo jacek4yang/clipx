@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: 'Publish v0.1.0-rc.2 from this exact tested commit'
+        description: 'Publish v0.1.0-rc.3 from this exact tested commit'
         type: boolean
         default: false
 permissions:
@@ -63,7 +63,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked --target ${{ matrix.target }} --test clipboard_graphical -- --ignored --nocapture
       - run: cargo build --locked --target ${{ matrix.target }} --release
-      - name: Verify stateless prompts and independent yes flags
+      - name: Install Windows ConPTY test driver
+        if: runner.os == 'Windows'
+        run: python -m pip install pywinpty==3.0.5
+      - name: Verify real terminal prompts and independent yes flags
         shell: bash
         run: python tests/cli_confirmation.py target/${{ matrix.target }}/release/clipx${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: Kill receiver and verify automatic process-restart resume

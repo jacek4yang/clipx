@@ -1,4 +1,4 @@
-//! One-time session approval. No identity or trust is persisted.
+//! Process-local peer approval. Verified certificate pins live only in RAM.
 use crate::{
     identity::Identity,
     protocol::{self, Msg},
@@ -6,9 +6,9 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use std::{
-    io::{self, Write},
+    collections::HashSet,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -18,7 +18,8 @@ use std::{
 pub struct Approval {
     pub interactive: bool,
     busy: Arc<AtomicBool>,
-    terminal: bool,
+    trusted: Arc<Mutex<HashSet<String>>>,
+    interrupted: Arc<tokio::sync::Notify>,
     automatic: bool,
     #[cfg(test)]
     test_answer: Option<bool>,
@@ -34,7 +35,8 @@ impl Approval {
         Self {
             interactive,
             busy: Arc::new(AtomicBool::new(false)),
-            terminal: false,
+            trusted: Arc::new(Mutex::new(HashSet::new())),
+            interrupted: Arc::new(tokio::sync::Notify::new()),
             automatic: false,
             #[cfg(test)]
             test_answer: None,
@@ -46,9 +48,24 @@ impl Approval {
         s
     }
     pub fn terminal() -> Self {
-        let mut s = Self::new(true);
-        s.terminal = true;
-        s
+        Self::new(true)
+    }
+    pub async fn interrupted(&self) {
+        self.interrupted.notified().await;
+    }
+    pub fn remember(&self, fingerprint: &str) {
+        if !self.automatic {
+            self.trusted
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(fingerprint.into());
+        }
+    }
+    pub fn knows(&self, fingerprint: &str) -> bool {
+        self.trusted
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(fingerprint)
     }
     #[cfg(test)]
     pub fn testing(answer: bool) -> Self {
@@ -56,15 +73,18 @@ impl Approval {
         s.test_answer = Some(answer);
         s
     }
-    pub async fn confirm(&self, code: &str, peer: &str) -> Result<bool> {
+    pub async fn confirm(&self, code: &str, peer: &str, fingerprint: &str) -> Result<bool> {
         #[cfg(test)]
         if let Some(answer) = self.test_answer {
             return Ok(answer);
         }
+        crate::prompt::banner(code, peer);
         if self.automatic {
-            eprintln!(
-                "\nPairing fingerprint: {code}\nPeer name (not verified): {peer:?}\nWARNING: --yes accepts this session without local identity verification."
-            );
+            eprintln!("WARNING: --yes skips local verification for this process.");
+            return Ok(true);
+        }
+        if self.knows(fingerprint) {
+            eprintln!("✓ 已在当前进程核对 / Verified earlier in this process; waiting for peer.");
             return Ok(true);
         }
         if !self.interactive {
@@ -77,41 +97,10 @@ impl Approval {
         {
             bail!("another pairing prompt is waiting; finish or clear that prompt before retrying");
         }
-        let busy = Busy(self.busy.clone());
-        eprintln!(
-            "\nPairing fingerprint: {code}\nPeer name (not yet trusted): {peer:?}\nCompare the ENTIRE identical fingerprint on the other computer."
-        );
-        eprintln!("Allow this transfer only? [y/N]");
-        io::stderr().flush()?;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        // A detached input thread does not keep the runtime alive on Ctrl+C.
-        // If the peer cancels, the gate remains held until this pending line is cleared.
-        let terminal = self.terminal;
-        std::thread::spawn(move || {
-            let _busy = busy;
-            let mut line = String::new();
-            let result = if terminal {
-                use std::io::BufRead;
-                #[cfg(windows)]
-                let path = "CONIN$";
-                #[cfg(not(windows))]
-                let path = "/dev/tty";
-                std::fs::File::open(path)
-                    .and_then(|f| std::io::BufReader::new(f).read_line(&mut line))
-                    .map(|_| accepted(&line))
-            } else {
-                io::stdin().read_line(&mut line).map(|_| accepted(&line))
-            };
-            let _ = tx.send(result);
-        });
-        match tokio::time::timeout(Duration::from_secs(300), rx).await {
-            Ok(result) => Ok(result??),
-            Err(_) => bail!("pairing prompt timed out; press Enter to clear it before retrying"),
-        }
+        let _busy = Busy(self.busy.clone());
+        let (_running, rx) = crate::prompt::start(self.interrupted.clone());
+        rx.await?
     }
-}
-pub fn accepted(answer: &str) -> bool {
-    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 pub fn code(a: &str, b: &str) -> String {
     let (a, b) = if a < b { (a, b) } else { (b, a) };
@@ -124,8 +113,14 @@ pub fn code(a: &str, b: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-pub async fn exchange(w: &mut Wire, approval: &Approval, code: &str, peer: &str) -> Result<bool> {
-    let local = approval.confirm(code, peer);
+pub async fn exchange(
+    w: &mut Wire,
+    approval: &Approval,
+    code: &str,
+    peer: &str,
+    fingerprint: &str,
+) -> Result<bool> {
+    let local = approval.confirm(code, peer, fingerprint);
     let remote = async {
         let m: Msg =
             tokio::time::timeout(Duration::from_secs(300), protocol::read(&mut *w.r)).await??;
@@ -140,7 +135,7 @@ pub async fn exchange(w: &mut Wire, approval: &Approval, code: &str, peer: &str)
     // and starting a new one would corrupt framing. An aborted connection is discarded.
     tokio::select! {
         decision=&mut local=>{let accept=decision?;protocol::write(&mut *w.w,&Msg::PairDecision{accept}).await?;if !accept{return Ok(false);}Ok(remote.await?)},
-        decision=&mut remote=>{if !decision?{eprintln!("Other computer declined pairing. Clear any pending prompt with Enter.");return Ok(false);}let accept=local.await?;protocol::write(&mut *w.w,&Msg::PairDecision{accept}).await?;Ok(accept)},
+        decision=&mut remote=>{if !decision?{eprintln!("Other computer declined this session.");return Ok(false);}let accept=local.await?;protocol::write(&mut *w.w,&Msg::PairDecision{accept}).await?;Ok(accept)},
     }
 }
 pub async fn authorize(
@@ -157,6 +152,7 @@ pub async fn authorize(
         approval,
         &session_code(&id.fp(), &s.fingerprint, &s.session_nonce, &s.binding),
         &s.peer_name,
+        &s.fingerprint,
     )
     .await?
     {
@@ -166,6 +162,7 @@ pub async fn authorize(
         bail!("receiver did not approve this session");
     }
     s.ctrl.send(&Msg::Ack).await?;
+    approval.remember(&s.fingerprint);
     s.authorized = true;
     Ok(())
 }
@@ -182,13 +179,16 @@ mod tests {
         assert_eq!(super::code("a", "b"), super::code("b", "a"));
         assert_ne!(super::code("a", "b"), super::code("a", "attacker"));
     }
-    #[test]
-    fn only_explicit_yes_accepts() {
-        for s in ["y", "Y", "yes", " YES\n"] {
-            assert!(super::accepted(s));
-        }
-        for s in ["", "\n", "n", "no", "maybe", "okay"] {
-            assert!(!super::accepted(s));
-        }
+    #[tokio::test]
+    async fn trust_is_process_local_and_key_specific() {
+        let approval = super::Approval::new(false);
+        assert!(approval.confirm("code", "peer", "a").await.is_err());
+        approval.remember("a");
+        assert!(approval.confirm("code", "peer", "a").await.unwrap());
+        assert!(approval.confirm("code", "peer", "b").await.is_err());
+        assert!(!super::Approval::new(false).knows("a"));
+        let auto = super::Approval::automatic();
+        auto.remember("a");
+        assert!(!auto.knows("a"));
     }
 }

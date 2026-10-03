@@ -17,7 +17,7 @@ only OS DLLs are imported. Windows builds are unsigned and may require normal
 SmartScreen review. Documents are optional; `clipx licenses` embeds all notices.
 A binary is specific to its OS/architecture, not universal across every computer.
 
-## Two commands
+## Two commands (RC3 terminal UI)
 
 Receiver:
 ```sh
@@ -28,9 +28,16 @@ Sender (replace IP with receiver address):
 clipx send IP
 ```
 Both terminals display the SAME one-time session fingerprint. Compare the entire
-line over an independent trusted channel, then type `y` on each computer.
-Every new connection, including a retry, has a fresh code and requires approval.
-No device is remembered. Empty input, EOF, `n`, mismatch or timeout means stop.
+line over an independent trusted channel, then press `Y` on each computer (no Enter needed). `N` or Enter declines; Esc cancels; Ctrl+C exits.
+Dialoguer/Console render an inline prompt; Crossterm handles native, cancellable
+keyboard input. No full-screen UI. NO_COLOR is respected. A real terminal is
+required unless `--yes` was explicitly supplied.
+
+After both approve, each process remembers the peer certificate fingerprint ONLY
+in RAM. Reconnects between those same running processes do not prompt again.
+Fresh session codes still change, but the verified ephemeral peer identity is the
+cache key. Changed keys require new confirmation. Restart clears trust: running
+`clipx send` again creates a new process, even in the same terminal window.
 A displayed name is unverified metadata, not an identity guarantee.
 
 ### Optional unattended approval
@@ -62,8 +69,8 @@ clipx cleanup                      # inactive checkpoints older than 7 days
 ```
 
 Without `--yes`, `--stdin` reads confirmation from the controlling terminal,
-not from payload input. If no terminal exists, it fails safely. Normal prompts
-read stdin. Use `--yes` deliberately for scripts. There is no remote shell or
+not from payload input. If no terminal exists, it fails safely. Piped `y` is not
+an interactive terminal and cannot silently authorize. Use `--yes` deliberately for scripts. There is no remote shell or
 automatic execution of received files.
 Global `--downloads`, `--port`, `--transport`, `--json`, `--quiet`, `--verbose`
 may appear after subcommands. Default port is UDP/TCP 45817. JSON data goes to
@@ -82,8 +89,8 @@ receiver revalidates stored chunks; both ends compare the prefix hash before usi
 it. A different source prefix restarts that file rather than splicing content.
 
 Transient failures retry up to three times by default (`--retries 0..12`), with
-backoff. Each new session requires fresh confirmation unless that side uses
-`--yes`. Auto retries prefer TCP. Ctrl+C stops the process; partial output remains
+backoff. A peer already verified in the same process is remembered in RAM; otherwise
+confirmation is required unless that side uses `--yes`. Auto retries prefer TCP. Ctrl+C stops the process; partial output remains
 hidden and resumable. `cleanup --days N` removes only inactive recognized
 checkpoints. No startup service or automatic cleanup task is installed.
 

@@ -15,10 +15,15 @@ Both computers display a full 256-bit grouped hexadecimal code derived from
 both certificate fingerprints, a fresh receiver nonce and the connection's TLS
 exporter. Compare the ENTIRE code over an independent trusted channel and type
 y on both ends. A man-in-the-middle terminates different TLS sessions and produces
-different codes. Device names are untrusted, escaped display metadata. Reconnects
-require new approval. Decline, EOF, invalid messages and timeout fail closed.
-Concurrent interactive prompts are rejected; a cancelled input prompt must be
-cleared before another prompt can consume input.
+different codes. Device names are untrusted, escaped display metadata. Each process remembers mutually approved certificate fingerprints only in RAM.
+Reconnects proving possession of those same keys reuse local approval; changed
+keys or a restarted process require new approval. Decline, EOF, invalid messages and timeout fail closed.
+Concurrent interactive prompts are rejected. A cancelled prompt stops its input
+reader, restores terminal raw/cursor state, and releases the next prompt without
+requiring a stale Enter. Terminal events use cancellable Crossterm polling;
+Dialoguer renders confirmation. Buffered type-ahead is drained and bracketed
+paste ignored before accepting a fresh physical Y/N key. No terminal means a
+fail-closed error unless explicit --yes is used.
 
 `--yes` deliberately waives LOCAL manual identity verification for this process.
 The other endpoint still independently decides. Both `--yes` means encryption
@@ -26,7 +31,7 @@ without human-authenticated identity: active interception is not excluded.
 `recv --yes` automatically accepts new incoming sessions while running, including
 unwanted senders that can reach its port. Restrict binding and existing firewall/
 tailnet ACLs. The tool does not modify those security settings. No trust decision
-is saved. There is no safety bypass hidden in a config or environment variable.
+is written to disk; approved certificate identities expire when the process exits. There is no safety bypass hidden in a config or environment variable.
 
 Sender writes no identity/config/cache/spool. Receiver checkpoints exist only as
 private `.clipx-part-UUID` directories inside Downloads. They contain payloads,

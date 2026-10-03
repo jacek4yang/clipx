@@ -465,3 +465,34 @@ async fn explicit_pair_probe_both_transports() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn ram_pins_allow_reconnect_but_not_new_identity() -> Result<()> {
+    let mut f = Fixture::new()?;
+    let approval = crate::pairing::Approval::new(false);
+    approval.remember(&f.receiver.fp());
+    let incoming = crate::pairing::Approval::new(false);
+    incoming.remember(&f.sender.fp());
+    f.options = Arc::new(Receiver {
+        downloads: f.options.downloads.clone(),
+        headless: true,
+        clipboard: crate::clipboard::writer(),
+        concurrency: 4,
+        approval: incoming,
+    });
+    let task = f.server("tcp").await?;
+    for _ in 0..2 {
+        let mut s = transport::connect("127.0.0.1", f.port, "tcp", &f.sender, true).await?;
+        crate::pairing::authorize(&mut s, &f.sender, &approval).await?;
+        assert!(s.authorized);
+    }
+    let stranger = Identity::ephemeral()?;
+    let mut s = transport::connect("127.0.0.1", f.port, "tcp", &stranger, true).await?;
+    assert!(
+        crate::pairing::authorize(&mut s, &stranger, &approval)
+            .await
+            .is_err()
+    );
+    task.abort();
+    Ok(())
+}

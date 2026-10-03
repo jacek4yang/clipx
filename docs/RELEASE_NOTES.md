@@ -1,22 +1,20 @@
-# clipx v0.1.0-rc.2
+# clipx v0.1.0-rc.3
 
-Stateless, one-time-confirmed transfer workflow. Upgrade BOTH ends: protocol v2
-is intentionally incompatible with rc.1.
+Fix real terminal confirmation and add explicitly requested RAM-only peer trust.
 
-- `clipx recv` and `clipx send IP`: compare the same fresh session fingerprint,
-  type y on both computers. Codes bind the ephemeral TLS session, not saved trust.
-- Optional `recv --yes` / `send --yes IP` waive only that side's local prompt.
-  Use trusted networks; unattended receivers accept reachable incoming senders.
-- No config, saved identity/private key, trust list, aliases or sender disk cache.
-- Only Downloads output and necessary private resumable checkpoints; successful
-  acknowledged delivery removes checkpoints. Repeat unchanged commands to resume.
-- QUIC/TCP TLS 1.3, bounded streaming/zstd, chunk/full-file checks, prefix validation,
-  restart-safe no-overwrite commit and explicit cleanup-completion handshake.
-- Windows x64 static CRT, Linux x64 musl static and GNU alternatives. Copy just
-  the binary into PATH; licenses remain embedded. No services or firewall changes.
+- Dialoguer/Console inline prompt with cancellable native Crossterm key events.
+  Press Y to accept immediately; N or Enter declines; Esc cancels; Ctrl+C exits.
+  Clear bilingual labels, no full-screen takeover, NO_COLOR support.
+- Peer cancellation/timeout restores terminal mode and cursor and releases the
+  input reader. No detached read_line stealing the next answer.
+- A successful mutual confirmation remembers the peer certificate identity only
+  in this process's RAM. Same-process reconnects skip repeat prompts; changed keys
+  or restarting either side requires new confirmation. No disk trust/config.
+- --yes remains independently local and process-scoped. A noninteractive input
+  pipe is not treated as an interactive terminal; scripts must explicitly use --yes.
+- Actual Linux PTY and Windows ConPTY keyboard tests replace RC2 pipe-only tests.
+- Protocol clipx/2 remains compatible, but upgrade both ends for the corrected UX.
 
-Candidate release: no independent security audit, no universal-platform claim.
-Windows binaries are unsigned; Wayland requires supported data-control protocols.
-Clipboard payloads use RAM; files stream. No durable delivery history means an
-ambiguous completion crash may yield a suffixed duplicate on a later new send.
-See README and SECURITY.md for exact semantics and limits.
+Windows x64 static CRT, Linux x64 static musl and GNU builds. All prior streaming,
+resume and no-overwrite behavior retained. Candidate release, not a zero-defect or
+universal-desktop guarantee. No runtime installation beyond the one executable.

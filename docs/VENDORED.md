@@ -16,3 +16,14 @@ real Windows CI test for a 1x1 image. The public reader still uses clipboard-rs.
 
 When upgrading clipboard-rs, re-run the real X11 and Windows clipboard tests and
 check whether these workarounds can be removed. Do not remove a failing test.
+
+## Dialoguer 0.12.0
+
+Upstream https://github.com/console-rs/dialoguer, MIT. Vendored from crates.io
+0.12.0 with a narrow adapter: Confirm::interact_on_with_reader accepts a key-read
+closure, while retaining upstream rendering and acceptance behavior. Existing
+interact methods retain their original console reader. clipx supplies cancellable
+Crossterm poll/read events, so a peer disconnect or timeout can restore raw mode
+and release the prompt instead of leaving a detached stdin thread behind.
+The source patch is confined to src/prompts/confirm.rs. Optional editor/password/
+history features are disabled; no runtime dependency files are required.

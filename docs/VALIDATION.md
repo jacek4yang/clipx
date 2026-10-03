@@ -1,18 +1,19 @@
-# Validation record — RC2, 2026-10-03
+# Validation record — RC3, 2026-10-03
 
 ## Local gates (Debian 13 x64, Rust 1.99.0)
 
-- 32 unit/property/real-network tests pass. Coverage includes QUIC/TCP, automatic
+- 33 unit/property/real-network tests pass. Coverage includes QUIC/TCP, automatic
   fallback, fresh-key/fresh-operation checkpoint adoption after interruption,
   corrupted journal recovery, same-metadata/different-content prefix rejection
   and restart, traversal rejection, checksums, collision/no-overwrite, finalization
   recovery, completion pagination, unauthorized payload and declined sessions.
 - Strict all-target/all-feature Clippy and rustfmt pass.
-- Real CLI confirmation test: 12 combinations (QUIC/TCP/auto × four independent
-  sender/receiver --yes combinations), matching fresh codes, no preapproval disk
-  writes, success checkpoint removal, no home config/cache/identity files.
-  Explicit rejection tested on either endpoint against an automatically accepting
-  opposite endpoint. These exercise production prompts, not a test-only bypass.
+- Real POSIX PTY / Windows ConPTY terminal test, not redirected stdin: twelve
+  QUIC/TCP/auto × independent --yes combinations; direct Y without Enter; Enter/N/
+  Esc rejection; invalid key; peer cancellation then another working prompt;
+  Ctrl+C exit; no configuration files and successful checkpoint removal.
+- RAM certificate-pin tests verify same-process reconnect reuse, changed identity
+  rejection and fresh-process reset. Automatic --yes does not seed manual trust.
 - CLI fault injection: sever TLS mid-file, kill/restart receiver, reconnect with
   new ephemeral identity and resume a 64 MiB file; independent SHA-256 matches.
   This test uses explicit --yes on disposable loopback endpoints.
@@ -29,7 +30,7 @@ must pass format/lint/unit/network tests, actual platform clipboard tests, relea
 build, real CLI confirmation and receiver-restart tests. Windows PE imports must
 be OS-only; musl must have neither ELF interpreter nor NEEDED shared libraries.
 Only then can the release job publish all three archives and SHA256SUMS.txt.
-Use the workflow run for the exact release commit, not RC1 as evidence for RC2:
+Use the workflow run for the exact release commit, not RC1 as evidence for RC3:
 https://github.com/jacek4yang/clipx/actions/workflows/ci.yml
 
 The Windows DIBV5+PNG writer and vendored X11 diagnostic fix were established by
@@ -52,3 +53,6 @@ history. A completion-boundary crash can produce a suffixed duplicate on a fresh
 send, never replacement of existing output.
 
 Reproduce with README commands, tests/large_file.py and tools/benchmark.py.
+
+RC2 pipe-only prompt tests did not cover real terminal behavior reported broken
+by the user. RC3 replaces that gate with actual pseudoterminal interaction.

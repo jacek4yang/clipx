@@ -15,7 +15,8 @@ bounded to 1 MiB; zstd window/output bounds apply.
 3. The selected connection alone receives PairStart (auto transport losers close).
 4. Each side derives the same session code from both certificate fingerprints,
    nonce and TLS exporter label EXPORTER-clipx-session. Each sends PairDecision
-   after explicit local y, or explicit per-process --yes. Both must accept.
+   after local Y, an in-memory previously verified certificate pin, or explicit
+   per-process --yes. Both must accept.
    Receiver sends SessionApproved; sender Ack. No persisted trust results.
 5. Offer(UUID, kind, count, total), then count Entry(path,size,directory,mtime/ns).
    Receiver validates paths, counts, metadata and free space, locks a checkpoint,
@@ -35,7 +36,9 @@ bounded to 1 MiB; zstd window/output bounds apply.
     warning; it must not trigger retransmission of already committed data.
 
 Busy frames provide keepalive during cancellable prefix hashing. Invalid states
-fail closed. New physical connections require fresh approval. Same-process retries
+fail closed. New physical connections require approval unless their peer certificate identity
+is already verified in this process. That bounded-lifetime cache is RAM-only;
+automatic --yes acceptance does not populate it. Same-process retries
 reuse operation UUID; fresh-process sends may adopt matching unfinished manifests,
 but validate content prefixes independently. No identity binding is persisted.
 Successful checkpoint removal ends deduplication. A later new send after an

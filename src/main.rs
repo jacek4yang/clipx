@@ -322,6 +322,7 @@ async fn run() -> Result<()> {
             loop {
                 tokio::select! {
                     _=tokio::signal::ctrl_c()=>break,
+                    _=options.approval.interrupted()=>break,
                     Some(_)=jobs.join_next(),if !jobs.is_empty()=>{},
                     socket=async{match &tcp{Some(t)=>t.accept().await,None=>std::future::pending().await}}=>{let(socket,_)=socket?;let Ok(permit)=permits.clone().try_acquire_owned()else{continue;};let tls=tls.clone();let id=id.clone();let options=options.clone();jobs.spawn(async move{let _permit=permit;serve(tokio::time::timeout(Duration::from_secs(10),transport::accept_tcp(socket,tls)).await,id,options).await;});},
                     incoming=async{match &quic{Some(q)=>q.accept().await,None=>std::future::pending().await}}=>{let Some(incoming)=incoming else{break;};let Ok(permit)=permits.clone().try_acquire_owned()else{incoming.refuse();continue;};let id=id.clone();let options=options.clone();jobs.spawn(async move{let _permit=permit;serve(tokio::time::timeout(Duration::from_secs(10),transport::accept_quic(incoming)).await,id,options).await;});},

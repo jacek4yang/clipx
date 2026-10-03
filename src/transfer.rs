@@ -938,13 +938,16 @@ pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> 
         bail!("expected selected session approval");
     }
     let code = crate::pairing::session_code(&id.fp(), &s.fingerprint, &nonce, &s.binding);
-    if !crate::pairing::exchange(&mut s.ctrl, &options.approval, &code, &name).await? {
+    if !crate::pairing::exchange(&mut s.ctrl, &options.approval, &code, &name, &s.fingerprint)
+        .await?
+    {
         bail!("session declined; no payload accepted");
     }
     s.ctrl.send(&Msg::SessionApproved).await?;
     if !matches!(s.ctrl.recv().await?, Msg::Ack) {
         bail!("expected approval acknowledgement");
     }
+    options.approval.remember(&s.fingerprint);
     s.authorized = true;
     let offer = match s.ctrl.recv().await? {
         Msg::Offer(o) if o.count > 0 && o.count <= protocol::MAX_ENTRIES => o,
