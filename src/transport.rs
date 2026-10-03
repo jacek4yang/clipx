@@ -87,6 +87,9 @@ async fn ready(mut s: Session, id: &Identity, pair: bool) -> Result<Session> {
         Msg::Ready { version, chunk, .. } => protocol::check_version(version, chunk)?,
         _ => bail!("expected SessionReady"),
     }
+    if pair {
+        s.ctrl.send(&Msg::Ack).await?;
+    }
     Ok(s)
 }
 async fn one(

@@ -394,3 +394,15 @@ async fn concurrent_atomic_collision() -> Result<()> {
     task.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn explicit_pair_probe_both_transports() -> Result<()> {
+    for mode in ["quic", "tcp"] {
+        let f = Fixture::new()?;
+        let task = f.server(mode).await?;
+        let s = transport::connect("127.0.0.1", f.port, mode, &f.sender, None, true).await?;
+        assert_eq!(s.fingerprint, f.receiver.fp());
+        task.abort();
+    }
+    Ok(())
+}

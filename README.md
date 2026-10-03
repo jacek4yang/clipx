@@ -1,5 +1,7 @@
 # clipx
 
+[中文快速上手](README.zh-CN.md)
+
 Explicit, encrypted, resumable clipboard and file transfers between your own
 Windows 11 and Linux Mint computers. One Rust executable; no cloud service,
 account, multicast discovery, HTTP server, GUI or background clipboard watcher.

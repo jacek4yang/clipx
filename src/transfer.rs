@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -161,7 +161,11 @@ struct ActiveFile {
     _guard: Option<Arc<File>>,
 }
 impl ActiveFile {
+    #[cfg(test)]
     fn open(stage: &Path, index: usize, size: u64) -> Result<Self> {
+        Self::open_cancel(stage, index, size, &AtomicBool::new(false))
+    }
+    fn open_cancel(stage: &Path, index: usize, size: u64, cancel: &AtomicBool) -> Result<Self> {
         let path = file_path(stage, index);
         if !path.exists() {
             OpenOptions::new()
@@ -181,6 +185,9 @@ impl ActiveFile {
         let mut data = vec![0; CHUNK];
         let mut hash = [0; 32];
         while offset < size && journal.read_exact(&mut hash).is_ok() {
+            if cancel.load(Ordering::Relaxed) {
+                bail!("verification cancelled");
+            }
             let n = (size - offset).min(CHUNK as u64) as usize;
             if file.read_exact(&mut data[..n]).is_err()
                 || blake3::hash(&data[..n]).as_bytes() != &hash
@@ -232,11 +239,19 @@ impl ActiveFile {
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(f).await?
 }
+struct CancelOnDrop(Arc<AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
 async fn blocking_heartbeat<T: Send + 'static>(
     w: &mut Wire,
-    f: impl FnOnce() -> Result<T> + Send + 'static,
+    f: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    let mut task = tokio::task::spawn_blocking(f);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _guard = CancelOnDrop(cancel.clone());
+    let mut task = tokio::task::spawn_blocking(move || f(cancel));
     let mut tick = tokio::time::interval(Duration::from_secs(15));
     tick.tick().await;
     loop {
@@ -263,7 +278,7 @@ async fn send_file(
     let expected = entry.clone();
     progress.resumed.fetch_add(offset, Ordering::Relaxed);
     progress.verified.fetch_add(offset, Ordering::Relaxed);
-    let (file, mut hasher) = blocking_heartbeat(w, move || {
+    let (file, mut hasher) = blocking_heartbeat(w, move |cancel| {
         let mut file = open_regular(&src, false)?;
         let meta = file.metadata()?;
         if meta.len() != expected.size || stamp(&meta) != expected.modified {
@@ -273,6 +288,9 @@ async fn send_file(
         let mut buf = vec![0; CHUNK];
         let mut left = offset;
         while left > 0 {
+            if cancel.load(Ordering::Relaxed) {
+                bail!("verification cancelled");
+            }
             let n = left.min(CHUNK as u64) as usize;
             file.read_exact(&mut buf[..n])?;
             hash.update(&buf[..n]);
@@ -357,8 +375,14 @@ async fn recv_worker(
         let st = stage.clone();
         let size = entry.size;
         let guard = guard.clone();
-        let mut active = blocking_heartbeat(w, move || {
-            let mut a = ActiveFile::open(&st, index, size)?;
+        let mut active = blocking_heartbeat(w, move |cancel| {
+            // A previous FileDone must never authorize newly repaired/truncated bytes.
+            match fs::remove_file(st.join(format!("done-{index}.json"))) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            let mut a = ActiveFile::open_cancel(&st, index, size, &cancel)?;
             a._guard = Some(guard);
             Ok(a)
         })
@@ -622,6 +646,13 @@ fn commit_files(downloads: &Path, stage: &Path, stored: &Stored) -> Result<Vec<S
             filetime::set_file_mtime(p, filetime::FileTime::from_unix_time(e.modified, 0))?;
         }
     }
+    for e in stored.entries.iter().rev().filter(|e| e.directory) {
+        let p = tree.join(&e.path);
+        if p.exists() {
+            paths::sync_dir(&p)?;
+        }
+    }
+    paths::sync_dir(&tree)?;
     let mut out = Vec::new();
     for e in stored.entries.iter().filter(|e| !e.path.contains('/')) {
         let src = tree.join(&e.path);
@@ -643,6 +674,8 @@ fn commit_files(downloads: &Path, stage: &Path, stored: &Stored) -> Result<Vec<S
             paths::atomic_json(&cp, &commits)?;
             match paths::rename_noreplace(&src, &dst) {
                 Ok(()) => {
+                    paths::sync_dir(downloads)?;
+                    paths::sync_dir(&tree)?;
                     out.push(dst.to_string_lossy().into_owned());
                     break;
                 }
@@ -721,6 +754,9 @@ pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> 
             "Pair probe: {}. Trust this fingerprint locally only after verifying it on the other device.",
             s.fingerprint
         );
+        if !matches!(s.ctrl.recv().await?, Msg::Ack) {
+            bail!("expected pairing acknowledgement");
+        }
         return Ok(());
     }
     let offer = match s.ctrl.recv().await? {
@@ -792,10 +828,20 @@ pub async fn receive(s: &mut Session, id: &Identity, options: Arc<Receiver>) -> 
             r??;
         }
     } else {
-        recv_worker(&mut s.ctrl, stage.clone(), entries, busy, guard.clone()).await?;
+        recv_worker(
+            &mut s.ctrl,
+            stage.clone(),
+            entries,
+            busy.clone(),
+            guard.clone(),
+        )
+        .await?;
     }
     if !matches!(s.ctrl.recv().await?, Msg::Finish) {
         bail!("expected transfer finish");
+    }
+    if busy.lock().await.len() != stored.entries.iter().filter(|e| !e.directory).count() {
+        bail!("every file must complete integrity verification in this session");
     }
     for (i, e) in stored.entries.iter().enumerate() {
         if !e.directory

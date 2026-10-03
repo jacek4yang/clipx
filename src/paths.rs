@@ -149,9 +149,13 @@ pub fn rename_noreplace(source: &Path, dest: &Path) -> std::io::Result<()> {
         let a: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
         let b: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: both buffers are NUL-terminated and live for this synchronous call.
-        // Flags=0 intentionally forbids replacement and cross-volume copy fallback.
+        // WRITE_THROUGH requests durability; no REPLACE_EXISTING or COPY_ALLOWED flags are used.
         if unsafe {
-            windows_sys::Win32::Storage::FileSystem::MoveFileExW(a.as_ptr(), b.as_ptr(), 0)
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                a.as_ptr(),
+                b.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+            )
         } == 0
         {
             Err(std::io::Error::last_os_error())
@@ -167,6 +171,13 @@ pub fn rename_noreplace(source: &Path, dest: &Path) -> std::io::Result<()> {
             "atomic no-replace supported on Linux and Windows",
         ))
     }
+}
+pub fn sync_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path; // Windows move uses WRITE_THROUGH; file content is FlushFileBuffers-backed.
+    Ok(())
 }
 pub fn atomic_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     use std::io::Write;
