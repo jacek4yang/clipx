@@ -1,0 +1,87 @@
+name: Build, test and release
+on:
+  push:
+    branches: [main, validation]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish v0.1.0-rc.1 from this exact tested commit'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
+      - name: Real X11 clipboard test
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth
+          xvfb-run -a cargo test --locked --test clipboard_graphical -- --ignored --nocapture
+      - name: Real Windows clipboard test
+        if: runner.os == 'Windows'
+        run: cargo test --locked --test clipboard_graphical -- --ignored --nocapture
+      - run: cargo build --locked --release
+      - name: Kill receiver and verify automatic process-restart resume
+        shell: bash
+        run: python tests/cli_recovery.py target/release/clipx${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Package executable and documentation
+        shell: bash
+        run: python tools/package.py '${{ matrix.target }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: clipx-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify and publish candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          TAG=v0.1.0-rc.1
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+          gh release create "$TAG" *.zip *.tar.gz SHA256SUMS.txt --target "$COMMIT" --title "clipx $TAG" --notes-file ../docs/RELEASE_NOTES.md --prerelease
