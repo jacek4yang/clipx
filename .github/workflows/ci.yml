@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: 'Publish v0.1.0 from this exact tested commit'
+        description: 'Publish the Cargo version from this exact tested commit'
         type: boolean
         default: false
 permissions:
@@ -23,12 +23,24 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            macos_min: "10.13"
+            macos_arch: x86_64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            macos_min: "11.0"
+            macos_arch: aarch64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min || '10.13' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -37,11 +49,11 @@ jobs:
         shell: bash
         run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
       - name: Install musl build tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: endsWith(matrix.target, '-linux-musl')
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools
-          rustup target add x86_64-unknown-linux-musl
+          rustup target add ${{ matrix.target }}
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -59,6 +71,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb xauth
           xvfb-run -a cargo test --locked --target ${{ matrix.target }} --test clipboard_graphical -- --ignored --nocapture
+      - name: Real macOS clipboard test
+        if: runner.os == 'macOS'
+        run: cargo test --locked --target ${{ matrix.target }} --test clipboard_graphical -- --ignored --nocapture
       - name: Real Windows clipboard test
         if: runner.os == 'Windows'
         run: cargo test --locked --target ${{ matrix.target }} --test clipboard_graphical -- --ignored --nocapture
@@ -73,7 +88,7 @@ jobs:
         shell: bash
         run: python tests/cli_recovery.py target/${{ matrix.target }}/release/clipx${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: Verify self-contained Linux binary
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: endsWith(matrix.target, '-linux-musl')
         run: |
           file target/${{ matrix.target }}/release/clipx
           if readelf -l target/${{ matrix.target }}/release/clipx | grep INTERP; then exit 1; fi
@@ -82,6 +97,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: python tools/check_pe_imports.py target/${{ matrix.target }}/release/clipx.exe
+      - name: Verify macOS architecture and system-only dependencies
+        if: runner.os == 'macOS'
+        run: python tools/check_macho.py target/${{ matrix.target }}/release/clipx ${{ matrix.macos_min }} ${{ matrix.macos_arch }}
+      - name: Test Mach-O audit parser
+        if: runner.os == 'Linux'
+        run: python -m unittest discover -s tools -p 'test_check_macho.py'
       - name: Package executable and documentation
         shell: bash
         run: python tools/package.py '${{ matrix.target }}'

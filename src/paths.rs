@@ -135,8 +135,10 @@ pub fn collision(name: &str, n: u32, directory: bool) -> String {
     format!("{name} ({n})")
 }
 pub fn rename_noreplace(source: &Path, dest: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        // rustix maps NOREPLACE to Linux renameat2 or Darwin renameatx_np
+        // with RENAME_EXCL. Both reject existing entries atomically.
         rustix::fs::renameat_with(
             rustix::fs::CWD,
             source,
@@ -166,12 +168,12 @@ pub fn rename_noreplace(source: &Path, dest: &Path) -> std::io::Result<()> {
             Ok(())
         }
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = (source, dest);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "atomic no-replace supported on Linux and Windows",
+            "atomic no-replace supported on Linux, Windows and macOS",
         ))
     }
 }
@@ -222,5 +224,42 @@ mod tests {
         assert_eq!(fs::read(b).unwrap(), b"second");
         assert_eq!(collision("a.txt", 1, false), "a (1).txt");
     }
+    #[test]
+    fn atomic_commit_supports_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("pending");
+        let dest = dir.path().join("received");
+        fs::write(&source, b"verified").unwrap();
+        rename_noreplace(&source, &dest).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"verified");
+        let source_dir = dir.path().join("pending-dir");
+        let dest_dir = dir.path().join("received-dir");
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(source_dir.join("nested"), b"nested data").unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+        assert!(rename_noreplace(&source_dir, &dest_dir).is_err());
+        assert!(source_dir.join("nested").exists());
+        fs::remove_dir(&dest_dir).unwrap();
+        rename_noreplace(&source_dir, &dest_dir).unwrap();
+        assert_eq!(fs::read(dest_dir.join("nested")).unwrap(), b"nested data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_commit_never_replaces_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let dest = dir.path().join("dest");
+        fs::write(&source, b"keep").unwrap();
+        std::os::unix::fs::symlink("missing", &dest).unwrap();
+        assert!(rename_noreplace(&source, &dest).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"keep");
+        assert_eq!(
+            fs::read_link(&dest).unwrap(),
+            std::path::PathBuf::from("missing")
+        );
+    }
+
     proptest::proptest! { #[test] fn never_escape(s in ".*") { if let Ok(mapped)=component(&s) { proptest::prop_assert!(!mapped.contains(['/','\\','\0'])); proptest::prop_assert!(!mapped.is_empty()); } } }
 }

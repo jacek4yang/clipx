@@ -1,4 +1,6 @@
-# Validation record — v0.1.0, 2026-10-03
+# Validation records
+
+## Historical v0.1.0, 2026-10-03
 
 ## Local gates (Debian 13 x64, Rust 1.99.0)
 
@@ -25,7 +27,7 @@
 
 ## Per-commit release gates
 
-GitHub Actions tests Windows x64, Linux GNU x64 and Linux musl x64. Every target
+GitHub Actions tests Windows x64, Linux GNU x64, Linux musl x64/ARM64 and Intel/ARM64 macOS. Every target
 must pass format/lint/unit/network tests, actual platform clipboard tests, release
 build, real CLI confirmation and receiver-restart tests. Windows PE imports must
 be OS-only; musl must have neither ELF interpreter nor NEEDED shared libraries.
@@ -56,3 +58,25 @@ Reproduce with README commands, tests/large_file.py and tools/benchmark.py.
 
 RC2 pipe-only prompt tests did not cover real terminal behavior reported broken
 by the user. RC3 replaces that gate with actual pseudoterminal interaction.
+
+
+## Intel macOS coverage boundary
+
+The native runner is `macos-15-intel`, with an `x86_64-apple-darwin`
+executable and `MACOSX_DEPLOYMENT_TARGET=10.13`. Its Mach-O load commands are
+checked for the architecture, maximum minimum-OS version, and system-only dylibs.
+These checks do not emulate older macOS releases or prove every runtime API is
+available there. A 2017 Intel MacBook remains a physical acceptance target.
+
+The same native job runs atomic no-replace file/directory tests, real pasteboard
+text/image/file-list tests, POSIX terminal confirmation and killed-receiver
+restart/resume tests. The clipboard fixture supplies a local path to the macOS
+backend, which constructs NSURL itself; passing a percent-encoded URI as a path
+would invalidate the Unicode/space fixture. CI packaging has no end-user Python
+or Homebrew dependency. Actual run receipts belong to their exact commit's Actions
+run; a configured test job is not evidence of a pass.
+
+ARM64 macOS uses the standard native `macos-15` runner and deployment target
+11.0, with the same clipboard/PTY/recovery gates. Linux ARM64 musl uses native
+`ubuntu-24.04-arm` and verifies no ELF interpreter or dynamic dependencies.
+Windows ARM64, 32-bit systems, Android and iOS are not native supported targets.

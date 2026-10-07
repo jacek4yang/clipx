@@ -60,4 +60,28 @@ QUIC 优先、TCP/TLS 回退，TLS 1.3。一次性指纹绑定双方临时证书
 剪贴板文字/图片需要内存；超大数据建议作为文件发送。Linux X11 支持剪贴板所有权，接收进程需保持运行；Wayland 依赖合成器 data-control 协议，不能保证任意 GNOME Wayland。无剪贴板时在 Downloads 保存文字/PNG。
 不支持符号链接、特殊文件或无效 Unicode 文件名；可移植文件名会做必要映射。不会导入远端权限、执行位、ACL 或执行收到的文件。
 
-这是 v0.1.0 稳定版。三平台构建及自动化测试覆盖不等于所有真实硬件均验证，也不承诺超过 LocalSend。详细边界见 [英文说明](README.md)、[验证记录](docs/VALIDATION.md) 和 [安全说明](SECURITY.md)。
+这是 v0.1.1 的代码与使用说明。多平台构建及自动化测试覆盖不等于所有真实硬件均验证，也不承诺超过 LocalSend。详细边界见 [英文说明](README.md)、[验证记录](docs/VALIDATION.md) 和 [安全说明](SECURITY.md)。
+
+
+## Intel macOS
+
+Intel 2017 MacBook Pro 对应 `x86_64-apple-darwin` 产物，不是 ARM64。
+构建部署目标设为 macOS 10.13；云端原生测试运行于 macOS 15 Intel，
+部署目标不代表已经在所有旧系统上实测。Apple Silicon 请用 `aarch64-apple-darwin`（部署目标 macOS 11+）；
+Linux ARM64 请用 `aarch64-unknown-linux-musl` 静态产物。
+运行无需 Homebrew、Rust、Python 或第三方动态库，仅使用系统框架。
+核验发布包校验值并解压后，将 `clipx` 放到 `~/.local/bin`：
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 755 clipx "$HOME/.local/bin/clipx"
+export PATH="$HOME/.local/bin:$PATH"
+clipx --help
+```
+
+需要长期生效时，由用户自行把 PATH 设置加入 shell 配置。程序不自动安装服务，
+不更改 shell 设置。产物未进行开发者签名或公证；若被系统阻止，先核验来源和
+校验值，再通过 macOS 正常安全界面审核，不要全局关闭 Gatekeeper。
+剪贴板操作需要已登录的图形会话；SSH／无桌面环境用 `--path`、`--text`、
+`--stdin` 等明确输入，并在接收端使用 `recv --headless`。
+文件和目录最终提交采用 macOS 原生原子不覆盖操作，已有文件不会被替换。
