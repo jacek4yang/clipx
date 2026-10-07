@@ -3,7 +3,7 @@
 [中文快速上手](README.zh-CN.md)
 
 One Rust executable for encrypted clipboard, file and directory transfers between
-Windows, Linux and Intel macOS computers. No account, config, saved identity, trust
+Windows, Linux and macOS computers. No account, config, saved identity, trust
 store, daemon, autostart, watcher, discovery or cloud service.
 
 ## Install once
@@ -11,6 +11,7 @@ store, daemon, autostart, watcher, discovery or cloud service.
 Download from [Releases](https://github.com/jacek4yang/clipx/releases), check the
 archive against SHA256SUMS.txt, extract the executable and put it on PATH.
 Linux x64: prefer **x86_64-unknown-linux-musl** (static, no shared-library runtime).
+Linux ARM64: choose **aarch64-unknown-linux-musl**, also static.
 Place `clipx` in `~/.local/bin` and ensure that directory is on your PATH.
 Windows x64: put `clipx.exe` in a PATH directory of your choice. Static MSVC CRT;
 only OS DLLs are imported. Windows builds are unsigned and may require normal
@@ -20,7 +21,8 @@ A binary is specific to its OS/architecture, not universal across every computer
 Intel macOS: use **x86_64-apple-darwin**, including Intel 2017 MacBook Pro.
 The build deployment target is macOS 10.13; native CI runs on macOS 15 Intel,
 so the deployment setting alone is not a claim of runtime testing on every
-older macOS release. Apple Silicon is not covered by this target.
+older macOS release. Apple Silicon uses **aarch64-apple-darwin** (macOS 11+
+deployment target), tested natively on the ARM64 macOS runner.
 No Homebrew, Rust, Python or third-party dylibs are needed to run the executable;
 macOS system frameworks remain required. After verifying the archive checksum,
 extract it and install only the executable:
@@ -193,7 +195,7 @@ python tests/cli_confirmation.py target/release/clipx
 python tests/cli_recovery.py target/release/clipx
 ```
 
-Rust 1.99.0 is pinned. CI tests Windows x64, GNU/Linux x64, static musl x64 and Intel macOS,
+Rust 1.99.0 is pinned. CI tests Windows x64, GNU/Linux x64, static musl x64/ARM64 and Intel/ARM64 macOS,
 including real clipboard round-trips and process-level transfer tests, before
 release. This stable release is not an independent security audit or a
 promise to outperform LocalSend. Wayland/compositor and physical desktop coverage

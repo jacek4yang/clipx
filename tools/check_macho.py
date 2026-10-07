@@ -1,4 +1,4 @@
-"""CI-only audit: Intel Mach-O, bounded deployment target, system dylibs only."""
+"""CI-only audit: Mach-O architecture, bounded deployment target, system dylibs only."""
 import pathlib
 import struct
 import sys
@@ -17,12 +17,13 @@ def packed_version(text):
     return (fields[0] << 16) | (fields[1] << 8) | fields[2]
 
 
-def audit(data, maximum):
+def audit(data, maximum, architecture="x86_64"):
+    expected_cpu = {"x86_64": 0x01000007, "aarch64": 0x0100000C}[architecture]
     if len(data) < 32:
         raise ValueError("truncated Mach-O header")
     magic, cpu, _, kind, count, size, _, _ = struct.unpack_from("<8I", data)
-    if magic != 0xFEEDFACF or cpu != 0x01000007 or kind != 2:
-        raise ValueError("expected a thin x86_64 Mach-O executable")
+    if magic != 0xFEEDFACF or cpu != expected_cpu or kind != 2:
+        raise ValueError(f"expected a thin {architecture} Mach-O executable")
     end = 32 + size
     if end > len(data) or count > size // 8:
         raise ValueError("invalid load-command bounds")
@@ -70,6 +71,6 @@ def audit(data, maximum):
 
 
 if __name__ == "__main__":
-    libraries = audit(pathlib.Path(sys.argv[1]).read_bytes(), sys.argv[2])
-    print("Intel macOS executable verified; system libraries only:")
+    libraries = audit(pathlib.Path(sys.argv[1]).read_bytes(), sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "x86_64")
+    print("macOS executable verified; system libraries only:")
     print("\n".join(libraries))

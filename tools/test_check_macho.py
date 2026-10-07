@@ -16,6 +16,14 @@ class MachOAudit(unittest.TestCase):
     def test_system_only_intel_passes(self):
         self.assertEqual(audit(binary(), "10.13"), ["/usr/lib/libSystem.B.dylib"])
 
+    def test_native_arm64_and_mismatched_architecture(self):
+        arm = binary(version="11.0", cpu=0x0100000C)
+        self.assertTrue(audit(arm, "11.0", "aarch64"))
+        with self.assertRaises(ValueError):
+            audit(arm, "11.0", "x86_64")
+        with self.assertRaises(ValueError):
+            audit(binary(), "11.0", "aarch64")
+
     def test_homebrew_and_rpath_dependencies_fail(self):
         for name in ("/opt/homebrew/lib/a.dylib", "/usr/local/lib/a.dylib", "@rpath/a.dylib", "/usr/lib/../../tmp/a.dylib"):
             with self.subTest(name=name), self.assertRaises(ValueError):

@@ -1,4 +1,6 @@
-# Validation record — v0.1.0, 2026-10-03
+# Validation records
+
+## Historical v0.1.0, 2026-10-03
 
 ## Local gates (Debian 13 x64, Rust 1.99.0)
 
@@ -25,7 +27,7 @@
 
 ## Per-commit release gates
 
-GitHub Actions tests Windows x64, Linux GNU x64, Linux musl x64 and Intel macOS. Every target
+GitHub Actions tests Windows x64, Linux GNU x64, Linux musl x64/ARM64 and Intel/ARM64 macOS. Every target
 must pass format/lint/unit/network tests, actual platform clipboard tests, release
 build, real CLI confirmation and receiver-restart tests. Windows PE imports must
 be OS-only; musl must have neither ELF interpreter nor NEEDED shared libraries.
@@ -73,3 +75,8 @@ backend, which constructs NSURL itself; passing a percent-encoded URI as a path
 would invalidate the Unicode/space fixture. CI packaging has no end-user Python
 or Homebrew dependency. Actual run receipts belong to their exact commit's Actions
 run; a configured test job is not evidence of a pass.
+
+ARM64 macOS uses the standard native `macos-15` runner and deployment target
+11.0, with the same clipboard/PTY/recovery gates. Linux ARM64 musl uses native
+`ubuntu-24.04-arm` and verifies no ELF interpreter or dynamic dependencies.
+Windows ARM64, 32-bit systems, Android and iOS are not native supported targets.
