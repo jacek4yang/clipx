@@ -3,7 +3,7 @@
 [中文快速上手](README.zh-CN.md)
 
 One Rust executable for encrypted clipboard, file and directory transfers between
-Windows 11 and Linux Mint computers. No account, config, saved identity, trust
+Windows, Linux and Intel macOS computers. No account, config, saved identity, trust
 store, daemon, autostart, watcher, discovery or cloud service.
 
 ## Install once
@@ -16,6 +16,32 @@ Windows x64: put `clipx.exe` in a PATH directory of your choice. Static MSVC CRT
 only OS DLLs are imported. Windows builds are unsigned and may require normal
 SmartScreen review. Documents are optional; `clipx licenses` embeds all notices.
 A binary is specific to its OS/architecture, not universal across every computer.
+
+Intel macOS: use **x86_64-apple-darwin**, including Intel 2017 MacBook Pro.
+The build deployment target is macOS 10.13; native CI runs on macOS 15 Intel,
+so the deployment setting alone is not a claim of runtime testing on every
+older macOS release. Apple Silicon is not covered by this target.
+No Homebrew, Rust, Python or third-party dylibs are needed to run the executable;
+macOS system frameworks remain required. After verifying the archive checksum,
+extract it and install only the executable:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 755 clipx "$HOME/.local/bin/clipx"
+export PATH="$HOME/.local/bin:$PATH"
+clipx --help
+```
+
+Add the PATH line to your shell configuration yourself if desired. The program
+does not install services or edit shell settings. Builds are unsigned and not
+notarized; if macOS blocks one, review it using macOS's normal security UI after
+verifying its source and checksum. Do not disable Gatekeeper globally.
+Clipboard operations require a logged-in graphical session. Over SSH/headless,
+use explicit inputs (`--path`, `--text`, `--stdin`) and `recv --headless`.
+The Intel CI job tests real pasteboard text/image/file lists, terminal prompts,
+file/directory publication and interrupted-transfer recovery, and rejects
+non-system runtime dylibs or a newer-than-declared deployment target.
+
 
 ## Two commands
 
@@ -137,8 +163,8 @@ compression/decompression and BLAKE3 chunk/full-file checks. Normal transfers
 hash while streaming. Resume re-reads verified prefixes without retransmitting
 matching bytes. Quinn CUBIC/PMTU defaults are retained.
 
-Verified trees commit via Linux renameat2(RENAME_NOREPLACE) or Windows MoveFileExW
-without replacement. Names get suffixes on collision. Multiple roots commit
+Verified trees commit via Linux renameat2(RENAME_NOREPLACE), macOS
+renamex_np(RENAME_EXCL), or Windows MoveFileExW without replacement. Names get suffixes on collision. Multiple roots commit
 one at a time; no cross-root atomicity or filesystem-backup promise.
 
 Contents and tree shape are preserved; modification times are applied where
@@ -167,7 +193,7 @@ python tests/cli_confirmation.py target/release/clipx
 python tests/cli_recovery.py target/release/clipx
 ```
 
-Rust 1.99.0 is pinned. CI tests Windows x64, GNU/Linux x64 and static musl x64,
+Rust 1.99.0 is pinned. CI tests Windows x64, GNU/Linux x64, static musl x64 and Intel macOS,
 including real clipboard round-trips and process-level transfer tests, before
 release. This stable release is not an independent security audit or a
 promise to outperform LocalSend. Wayland/compositor and physical desktop coverage

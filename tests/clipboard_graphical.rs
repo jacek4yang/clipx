@@ -1,4 +1,4 @@
-//! Run on a disposable X11 server with xvfb-run; Windows CI uses its desktop session.
+//! Run on a disposable X11 server with xvfb-run; Windows and macOS CI use their desktop sessions.
 use anyhow::{Result, anyhow};
 use clipboard_rs::{Clipboard, ClipboardContext, RustImageData, common::RustImage};
 #[tokio::test]
@@ -24,9 +24,9 @@ async fn graphical_text_image_and_copied_file_list() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("复制 file.txt");
     std::fs::write(&path, b"test")?;
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let copied = path.to_string_lossy().into_owned();
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let copied = url::Url::from_file_path(&path)
         .map_err(|_| anyhow!("file URI"))?
         .to_string();

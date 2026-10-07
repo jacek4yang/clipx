@@ -166,12 +166,41 @@ pub fn rename_noreplace(source: &Path, dest: &Path) -> std::io::Result<()> {
             Ok(())
         }
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        use std::{
+            ffi::{CString, c_char, c_int},
+            os::unix::ffi::OsStrExt,
+        };
+        // Darwin renamex_np(2): fail atomically if any destination entry exists.
+        // Do not emulate with exists()+rename(), which races and can overwrite.
+        const RENAME_EXCL: u32 = 0x0000_0004;
+        unsafe extern "C" {
+            fn renamex_np(from: *const c_char, to: *const c_char, flags: u32) -> c_int;
+        }
+        let from = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "source path contains NUL")
+        })?;
+        let to = CString::new(dest.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "destination path contains NUL",
+            )
+        })?;
+        // SAFETY: both NUL-terminated buffers remain valid during the synchronous
+        // system call. The operation does not follow the final destination entry.
+        if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = (source, dest);
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "atomic no-replace supported on Linux and Windows",
+            "atomic no-replace supported on Linux, Windows and macOS",
         ))
     }
 }
@@ -222,5 +251,42 @@ mod tests {
         assert_eq!(fs::read(b).unwrap(), b"second");
         assert_eq!(collision("a.txt", 1, false), "a (1).txt");
     }
+    #[test]
+    fn atomic_commit_supports_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("pending");
+        let dest = dir.path().join("received");
+        fs::write(&source, b"verified").unwrap();
+        rename_noreplace(&source, &dest).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"verified");
+        let source_dir = dir.path().join("pending-dir");
+        let dest_dir = dir.path().join("received-dir");
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(source_dir.join("nested"), b"nested data").unwrap();
+        fs::create_dir(&dest_dir).unwrap();
+        assert!(rename_noreplace(&source_dir, &dest_dir).is_err());
+        assert!(source_dir.join("nested").exists());
+        fs::remove_dir(&dest_dir).unwrap();
+        rename_noreplace(&source_dir, &dest_dir).unwrap();
+        assert_eq!(fs::read(dest_dir.join("nested")).unwrap(), b"nested data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_commit_never_replaces_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let dest = dir.path().join("dest");
+        fs::write(&source, b"keep").unwrap();
+        std::os::unix::fs::symlink("missing", &dest).unwrap();
+        assert!(rename_noreplace(&source, &dest).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"keep");
+        assert_eq!(
+            fs::read_link(&dest).unwrap(),
+            std::path::PathBuf::from("missing")
+        );
+    }
+
     proptest::proptest! { #[test] fn never_escape(s in ".*") { if let Ok(mapped)=component(&s) { proptest::prop_assert!(!mapped.contains(['/','\\','\0'])); proptest::prop_assert!(!mapped.is_empty()); } } }
 }
