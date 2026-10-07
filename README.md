@@ -164,7 +164,7 @@ hash while streaming. Resume re-reads verified prefixes without retransmitting
 matching bytes. Quinn CUBIC/PMTU defaults are retained.
 
 Verified trees commit via Linux renameat2(RENAME_NOREPLACE), macOS
-renamex_np(RENAME_EXCL), or Windows MoveFileExW without replacement. Names get suffixes on collision. Multiple roots commit
+renameatx_np(RENAME_EXCL), or Windows MoveFileExW without replacement. Names get suffixes on collision. Multiple roots commit
 one at a time; no cross-root atomicity or filesystem-backup promise.
 
 Contents and tree shape are preserved; modification times are applied where

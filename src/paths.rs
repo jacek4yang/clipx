@@ -135,8 +135,10 @@ pub fn collision(name: &str, n: u32, directory: bool) -> String {
     format!("{name} ({n})")
 }
 pub fn rename_noreplace(source: &Path, dest: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        // rustix maps NOREPLACE to Linux renameat2 or Darwin renameatx_np
+        // with RENAME_EXCL. Both reject existing entries atomically.
         rustix::fs::renameat_with(
             rustix::fs::CWD,
             source,
@@ -164,35 +166,6 @@ pub fn rename_noreplace(source: &Path, dest: &Path) -> std::io::Result<()> {
             Err(std::io::Error::last_os_error())
         } else {
             Ok(())
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::{
-            ffi::{CString, c_char, c_int},
-            os::unix::ffi::OsStrExt,
-        };
-        // Darwin renamex_np(2): fail atomically if any destination entry exists.
-        // Do not emulate with exists()+rename(), which races and can overwrite.
-        const RENAME_EXCL: u32 = 0x0000_0004;
-        unsafe extern "C" {
-            fn renamex_np(from: *const c_char, to: *const c_char, flags: u32) -> c_int;
-        }
-        let from = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "source path contains NUL")
-        })?;
-        let to = CString::new(dest.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "destination path contains NUL",
-            )
-        })?;
-        // SAFETY: both NUL-terminated buffers remain valid during the synchronous
-        // system call. The operation does not follow the final destination entry.
-        if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) } == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
         }
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
